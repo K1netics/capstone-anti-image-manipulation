@@ -1,31 +1,100 @@
-from io import BytesIO
-import requests
 import gradio as gr
-import requests
+import gc
+import inspect
+import os
 import torch
-from tqdm import tqdm
 from PIL import Image, ImageOps
 from diffusers import StableDiffusionInpaintPipeline
-from torchvision.transforms import ToPILImage
-from utils import preprocess, prepare_mask_and_masked_image, recover_image, resize_and_crop
+from utils import recover_image, resize_and_crop
+from immunization import ImmunizationConfig, immunize_image
 import numpy as np
 import sys, traceback
 
 gr.close_all()
-topil = ToPILImage()
 
-pipe_inpaint = StableDiffusionInpaintPipeline.from_pretrained(
-    "/home/tobi/.cache/huggingface/hub/models--sd2-community--stable-diffusion-2-inpainting/snapshots/5f74973cbb64c8568780732c17f43eb269d63a0d",
-    local_files_only=True,
-    torch_dtype=torch.float16,
-    safety_checker=None,
-)
-pipe_inpaint = pipe_inpaint.to("cuda")
+DEFAULT_INPAINT_MODEL_ID = "sd2-community/stable-diffusion-2-inpainting"
+EDITOR_IMAGE_SIZE = 512
+
+
+def _env_flag(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+INPAINT_MODEL_SOURCE = os.getenv("PHOTOGUARD_INPAINT_MODEL", DEFAULT_INPAINT_MODEL_ID)
+INPAINT_LOCAL_FILES_ONLY = _env_flag("PHOTOGUARD_LOCAL_FILES_ONLY", True)
+PIPELINE_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+PIPELINE_DTYPE = torch.float16 if PIPELINE_DEVICE == "cuda" else torch.float32
+
+try:
+    pipe_inpaint = StableDiffusionInpaintPipeline.from_pretrained(
+        INPAINT_MODEL_SOURCE,
+        local_files_only=INPAINT_LOCAL_FILES_ONLY,
+        torch_dtype=PIPELINE_DTYPE,
+        safety_checker=None,
+    )
+except (OSError, ValueError) as exc:
+    raise RuntimeError(
+        "Unable to load the inpainting model. Set PHOTOGUARD_INPAINT_MODEL to a local directory "
+        "or Hugging Face repo id. If the model is not cached locally, set "
+        "PHOTOGUARD_LOCAL_FILES_ONLY=0 to allow a download. "
+        f"Current source: {INPAINT_MODEL_SOURCE!r}."
+    ) from exc
+
+pipe_inpaint = pipe_inpaint.to(PIPELINE_DEVICE)
+if PIPELINE_DEVICE == "cpu":
+    pipe_inpaint.enable_attention_slicing()
 
 ## Good params for editing that we used all over the paper --> decent quality and speed   
 GUIDANCE_SCALE = 7.5
 NUM_INFERENCE_STEPS = 100
 DEFAULT_SEED = 1234
+DEFAULT_IMMUNIZATION_CONFIG = ImmunizationConfig(
+    profile_name="stable_diffusion",
+    target_mode="random",
+    iters=20,
+    target_strength=1.0,
+    chaos_strength=0.35,
+    denoiser_strength=0.2,
+    denoiser_steps=1,
+    eot_samples=1,
+    resize_jitter=0.05,
+    noise_strength=0.01,
+    blur_kernel_size=3,
+)
+
+
+def _cleanup_runtime_memory():
+    gc.collect()
+    if PIPELINE_DEVICE == "cuda":
+        torch.cuda.empty_cache()
+
+
+def _make_image_mask():
+    params = inspect.signature(gr.ImageMask).parameters
+    kwargs = {
+        "label": "Drawing tool to mask regions you want to keep, e.g. faces",
+        "type": "pil",
+        "image_mode": "RGB",
+        "sources": ["upload"],
+        "format": "webp",
+        "width": EDITOR_IMAGE_SIZE,
+        "height": EDITOR_IMAGE_SIZE,
+    }
+
+    # Keep the editor canvas fixed so large uploads do not balloon browser memory usage.
+    if "canvas_size" in params:
+        kwargs["canvas_size"] = (EDITOR_IMAGE_SIZE, EDITOR_IMAGE_SIZE)
+    if "fixed_canvas" in params:
+        kwargs["fixed_canvas"] = True
+    if "layers" in params:
+        kwargs["layers"] = False
+    if "transforms" in params:
+        kwargs["transforms"] = ()
+
+    return gr.ImageMask(**kwargs)
 
 def to_pil_image(image_input):
     """
@@ -72,94 +141,6 @@ def to_pil_image(image_input):
         return Image.fromarray(np.array(image_input)).convert("RGB")
     except Exception:
         raise TypeError(f"Unsupported image input type: {type(image_input)}")
-
-# --- then inside your run(...) function, replace the line that does:
-# init_image = Image.fromarray(image['image'])
-# with:
-
-def pgd(X, targets, model, criterion, eps=0.1, step_size=0.015, iters=40, clamp_min=0, clamp_max=1, mask=None):
-    X_adv = X.clone().detach() + (torch.rand(*X.shape)*2*eps-eps).cuda()
-    pbar = tqdm(range(iters))
-    for i in pbar:
-        actual_step_size = step_size - (step_size - step_size / 100) / iters * i  
-        X_adv.requires_grad_(True)
-
-        loss = (model(X_adv).latent_dist.mean - targets).norm()
-        pbar.set_description(f"Loss {loss.item():.5f} | step size: {actual_step_size:.4}")
-
-        grad, = torch.autograd.grad(loss, [X_adv])
-        
-        X_adv = X_adv - grad.detach().sign() * actual_step_size
-        X_adv = torch.minimum(torch.maximum(X_adv, X - eps), X + eps)
-        X_adv.data = torch.clamp(X_adv, min=clamp_min, max=clamp_max)
-        X_adv.grad = None    
-        
-        if mask is not None:
-            X_adv.data *= mask
-            
-    return X_adv
-
-def get_target():
-    target_url = 'https://www.rtings.com/images/test-materials/2015/204_Gray_Uniformity.png'
-    response = requests.get(target_url)
-    target_image = Image.open(BytesIO(response.content)).convert("RGB")
-    target_image = target_image.resize((512, 512))
-    return target_image
-
-def immunize_fn(init_image, mask_image):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # prepare inputs on device & half precision
-    mask, X = prepare_mask_and_masked_image(init_image, mask_image)
-    X = X.half().to(device)
-    mask = mask.half().to(device)
-
-    # compute targets WITHOUT building a grad graph (no need to backprop into target encoder)
-    with torch.no_grad():
-        # ensure preprocess(...) returns a tensor on CPU; move to device and half then encode
-        tgt = preprocess(get_target()).half().to(device)
-        targets = pipe_inpaint.vae.encode(tgt).latent_dist.mean.detach()
-
-    # Run PGD with mixed precision for forward/backward where possible
-    # PGD is expected to perform gradient updates, so we keep gradients enabled.
-    # If pgd internally expects X to require_grad, ensure it does.
-    # Use autocast to reduce memory for kernel ops.
-    adv_X = None
-    scaler = None
-    try:
-        with torch.cuda.amp.autocast(enabled=(device == "cuda")):
-            adv_X = pgd(
-                X,
-                targets=targets,
-                model=pipe_inpaint.vae.encode,
-                criterion=torch.nn.MSELoss(),
-                clamp_min=-1,
-                clamp_max=1,
-                eps=0.12,
-                step_size=0.01,
-                iters=200,
-                mask=1 - mask
-            )
-    finally:
-        # best-effort cleanup of temporaries
-        try:
-            del X, mask, tgt, targets
-        except Exception:
-            pass
-
-    # postprocess and transfer to PIL
-    # ensure adv_X is on CPU for topil if that helper expects CPU tensors
-    adv_X = (adv_X / 2 + 0.5).clamp(0, 1)
-    # move to CPU and convert if needed by your topil implementation
-    adv_image = topil(adv_X[0].detach().cpu()).convert("RGB")
-    adv_image = recover_image(adv_image, init_image, mask_image, background=True)
-
-    # synchronize and free cached GPU memory to avoid incremental growth between runs
-    if device == "cuda":
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-
-    return adv_image
 
 def run(image, prompt, seed, guidance_scale, num_inference_steps, immunize=False):
     """
@@ -245,45 +226,55 @@ def run(image, prompt, seed, guidance_scale, num_inference_steps, immunize=False
             "If your UI uses separate components for image and mask, change run() signature accordingly."
         )
 
-    # Convert to PIL and normalize size
-    init_image = to_pil_image(img_field)
-    init_image = resize_and_crop(init_image, (512, 512))
-
     if mask_field is None:
         raise ValueError(
             "No mask provided. Expected combined input like {'image':..., 'mask':...} or a tuple (image, mask)."
         )
 
-    # Convert mask to single channel, invert (your original behavior), and resize to match
-    mask_image = to_pil_image(mask_field)
-    mask_image = mask_image.convert("L")
-    mask_image = ImageOps.invert(mask_image)
-    mask_image = resize_and_crop(mask_image, init_image.size)
+    try:
+        # Convert to PIL and normalize size
+        init_image = to_pil_image(img_field)
+        init_image = resize_and_crop(init_image, (EDITOR_IMAGE_SIZE, EDITOR_IMAGE_SIZE))
 
-    # --- Optional immunize step (after we have images)
-    if immunize:
-        immunized_image = immunize_fn(init_image, mask_image)
+        # Convert mask to single channel, invert (your original behavior), and resize to match
+        mask_image = to_pil_image(mask_field)
+        mask_image = mask_image.convert("L")
+        mask_image = ImageOps.invert(mask_image)
+        mask_image = resize_and_crop(mask_image, init_image.size)
 
-    # --- call the inpainting pipeline (now init_image and mask_image are guaranteed)
-    image_edited = pipe_inpaint(
-        prompt=prompt,
-        image=init_image if not immunize else immunized_image,
-        mask_image=mask_image,
-        height=init_image.size[0],
-        width=init_image.size[1],
-        eta=1,
-        guidance_scale=guidance_scale,
-        num_inference_steps=num_inference_steps,
-    ).images[0]
+        # --- Optional immunize step (after we have images)
+        if immunize:
+            immunized_image, _ = immunize_image(
+                init_image,
+                mask_image,
+                pipe_inpaint,
+                prompt=prompt,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                config=DEFAULT_IMMUNIZATION_CONFIG,
+                seed=seed,
+            )
 
-    # --- postprocess / recover original colors / compose
-    image_edited = recover_image(image_edited, init_image, mask_image)
+        # --- call the inpainting pipeline (now init_image and mask_image are guaranteed)
+        image_edited = pipe_inpaint(
+            prompt=prompt,
+            image=init_image if not immunize else immunized_image,
+            mask_image=mask_image,
+            height=init_image.size[0],
+            width=init_image.size[1],
+            eta=1,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+        ).images[0]
 
-    # --- return same structure you had previously
-    if immunize:
-        return [(immunized_image, 'Immunized Image'), (image_edited, 'Edited After Immunization')]
-    else:
+        # --- postprocess / recover original colors / compose
+        image_edited = recover_image(image_edited, init_image, mask_image)
+
+        if immunize:
+            return [(immunized_image, 'Immunized Image'), (image_edited, 'Edited After Immunization')]
         return [(image_edited, 'Edited Image (Without Immunization)')]
+    finally:
+        _cleanup_runtime_memory()
 
 description='''<u>Official</u> demo of our paper: <br>
 **Raising the Cost of Malicious AI-Powered Image Editing** <br>
@@ -335,7 +326,7 @@ with gr.Blocks() as demo:
 
     with gr.Row():  
         with gr.Column():
-            imgmask = gr.ImageMask(label='Drawing tool to mask regions you want to keep, e.g. faces')
+            imgmask = _make_image_mask()
             prompt = gr.Textbox(label='Prompt', placeholder='A photo of a man in a wedding')
             seed = gr.Textbox(label='Seed (Change to get different edits)', placeholder=str(DEFAULT_SEED), visible=True)
             with gr.Accordion("Advanced Options", open=False):
@@ -352,6 +343,7 @@ with gr.Blocks() as demo:
                         elem_id="gallery",
                         columns=2,
                         height="auto",
+                        format="webp",
                                     )
             duplicate = gr.HTML("""
                 <p>For faster inference without waiting in queue, you may duplicate the space and upgrade to GPU in settings.
