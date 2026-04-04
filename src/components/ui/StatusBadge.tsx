@@ -5,9 +5,9 @@ interface StatusBadgeProps {
 }
 
 const config: Record<Status, { dotColor: string; label: string }> = {
-  checking: { dotColor: "#f59e0b", label: "Checking…" },
-  online:   { dotColor: "#22c55e", label: "API Online" },
-  offline:  { dotColor: "#d4183d", label: "Unable to reach API" },
+  checking: { dotColor: "var(--primary)", label: "Checking API" },
+  online: { dotColor: "var(--accent)", label: "API online" },
+  offline: { dotColor: "var(--destructive)", label: "API offline" },
 };
 
 export default function StatusBadge({ status }: StatusBadgeProps) {

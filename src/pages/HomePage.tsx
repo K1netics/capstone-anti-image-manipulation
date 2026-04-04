@@ -1,47 +1,60 @@
-import { useState } from "react";
-import UploadSection from "../components/home/UploadSection";
+import { startTransition, useState } from "react";
+import EditorWorkspace from "../components/home/EditorWorkspace";
 import OutputSection from "../components/home/OutputSection";
 import BackendStatus from "../components/home/BackendStatus";
 import FeaturesGrid from "../components/home/FeaturesGrid";
- 
+import { processImage } from "../lib/api";
+import type { GeneratedImage, ProcessRequest, ProcessResponse } from "../types/api";
+
 export default function HomePage() {
-  const [outputUrl, setOutputUrl] = useState<string | null>(null);
+  const [outputs, setOutputs] = useState<GeneratedImage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
- 
-  const handleGenerate = async (file: File) => {
+  const [error, setError] = useState<string | null>(null);
+  const [metadata, setMetadata] = useState<Pick<ProcessResponse, "device" | "modelSource"> | null>(null);
+
+  const handleProcess = async (request: ProcessRequest) => {
     setIsLoading(true);
-    setOutputUrl(null);
+    setError(null);
+
     try {
-      const formData = new FormData();
-      formData.append("image", file);
-      const res = await fetch("http://localhost:8000/embed", { method: "POST", body: formData });
-      if (res.ok) {
-        const blob = await res.blob();
-        setOutputUrl(URL.createObjectURL(blob));
-      }
-    } catch {
-      // Backend unreachable
+      const response = await processImage(request);
+      startTransition(() => {
+        setOutputs(response.outputs);
+        setMetadata({ device: response.device, modelSource: response.modelSource });
+      });
+    } catch (caughtError) {
+      setOutputs([]);
+      setMetadata(null);
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to process the image.");
     } finally {
       setIsLoading(false);
     }
   };
- 
+
   return (
     <main className="w-full">
       <section className="px-6 pt-20 pb-12 text-center" style={{ backgroundColor: "var(--background)" }}>
-        <h1 className="text-3xl md:text-4xl font-semibold mb-3" style={{ color: "var(--foreground)" }}>
-          Protecting Image Authenticity Against AI Manipulation
+        <p className="text-xs md:text-sm uppercase tracking-[0.28em] mb-4" style={{ color: "var(--accent)" }}>
+          Separate integrated project
+        </p>
+        <h1 className="text-3xl md:text-5xl font-semibold mb-4" style={{ color: "var(--foreground)" }}>
+          PhotoGuard without Gradio in the loop
         </h1>
-        <p className="max-w-2xl mx-auto text-sm md:text-base leading-relaxed" style={{ color: "var(--muted-foreground)" }}>
-          A privacy-first cybersecurity research platform that embeds cryptographic watermarks into
-          images. Detect tampering, verify authenticity, and establish provenance—without storing your data.
+        <p className="max-w-3xl mx-auto text-sm md:text-base leading-relaxed" style={{ color: "var(--muted-foreground)" }}>
+          This isolated workspace keeps the original demo untouched and replaces the embedded Gradio shell with a direct React-to-API flow.
         </p>
       </section>
- 
-      <div className="max-w-7xl mx-auto px-4 md:px-8 py-8 space-y-6">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6" style={{ alignItems: "stretch" }}>
-          <UploadSection onGenerate={handleGenerate} isLoading={isLoading} />
-          <OutputSection outputUrl={outputUrl} />
+
+      <div className="max-w-7xl mx-auto px-4 md:px-8 pb-10 space-y-6">
+        <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)] gap-6" style={{ alignItems: "start" }}>
+          <EditorWorkspace onProcess={handleProcess} isLoading={isLoading} error={error} />
+          <OutputSection
+            outputs={outputs}
+            isLoading={isLoading}
+            error={error}
+            device={metadata?.device ?? null}
+            modelSource={metadata?.modelSource ?? null}
+          />
         </div>
         <BackendStatus />
         <FeaturesGrid />

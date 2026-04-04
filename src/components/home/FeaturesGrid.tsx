@@ -1,32 +1,37 @@
-import { Shield, Star, Zap } from "lucide-react";
+import { Shield, ScanFace, Workflow } from "lucide-react";
 import FeatureCard from "../ui/FeatureCard";
 
 const FEATURES = [
   {
+    icon: <ScanFace className="w-5 h-5" />,
+    title: "Human-region masking",
+    description:
+      "Paint the face or other sensitive region directly in the new editor before sending the request to the API.",
+  },
+  {
     icon: <Shield className="w-5 h-5" />,
-    title: "Secure Embedding",
+    title: "No Gradio dependency",
     description:
-      "Advanced LSB steganography ensures your data remains hidden within the image structure.",
+      "This integrated workspace talks to its own API layer instead of embedding the original Gradio application.",
   },
   {
-    icon: <Star className="w-5 h-5" />,
-    title: "Lossless Quality",
+    icon: <Workflow className="w-5 h-5" />,
+    title: "Safe iteration path",
     description:
-      "Maintain visual fidelity while embedding your secret message in the image data.",
-  },
-  {
-    icon: <Zap className="w-5 h-5" />,
-    title: "Fast Processing",
-    description:
-      "Our optimized backend processes images quickly without compromising security.",
+      "The original PhotoGuard demo stays untouched while we shape the eventual product frontend and backend contract here.",
   },
 ];
 
 export default function FeaturesGrid() {
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-      {FEATURES.map((f) => (
-        <FeatureCard key={f.title} icon={f.icon} title={f.title} description={f.description} />
+      {FEATURES.map((feature) => (
+        <FeatureCard
+          key={feature.title}
+          icon={feature.icon}
+          title={feature.title}
+          description={feature.description}
+        />
       ))}
     </div>
   );
