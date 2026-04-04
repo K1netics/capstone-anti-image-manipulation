@@ -1,0 +1,12 @@
+.git
+.gitignore
+frontend/node_modules
+frontend/dist
+frontend/.vite
+backend/__pycache__
+backend/app/__pycache__
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.DS_Store
+models

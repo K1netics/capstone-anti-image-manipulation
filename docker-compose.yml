@@ -1,0 +1,29 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      PHOTOGUARD_INPAINT_MODEL: /app/models/local_inpaint_model
+      PHOTOGUARD_LOCAL_FILES_ONLY: "${PHOTOGUARD_LOCAL_FILES_ONLY:-1}"
+    volumes:
+      - ${MODEL_DIR:-../artifacts/local_inpaint_model}:/app/models/local_inpaint_model:ro
+      - photoguard_hf_cache:/root/.cache/huggingface
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: proxy/Dockerfile
+    depends_on:
+      - api
+    environment:
+      API_UPSTREAM: "${API_UPSTREAM:-http://api:8000}"
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    restart: unless-stopped
+
+volumes:
+  photoguard_hf_cache:
