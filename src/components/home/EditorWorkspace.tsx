@@ -4,8 +4,11 @@ import Card from "../ui/Card";
 import Button from "../ui/Button";
 import UploadZone from "../ui/UploadZone";
 import MaskEditor, { type MaskEditorHandle } from "./MaskEditor";
-import { createEditorImage, type EditorImageDimensions } from "../../lib/image";
-import type { ProcessRequest } from "../../types/api";
+import {
+  inspectEditorImage,
+  type EditorImageDimensions,
+} from "../../lib/image";
+import type { ImmunizationProfile, OutputFormat, ProcessRequest, WorkingResolution } from "../../types/api";
 
 interface EditorWorkspaceProps {
   onProcess: (request: ProcessRequest) => Promise<void>;
@@ -15,47 +18,51 @@ interface EditorWorkspaceProps {
 
 export default function EditorWorkspace({ onProcess, isLoading, error }: EditorWorkspaceProps) {
   const maskEditorRef = useRef<MaskEditorHandle>(null);
+  const previewUrlRef = useRef<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [preparedImage, setPreparedImage] = useState<File | null>(null);
+  const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [editorDimensions, setEditorDimensions] = useState<EditorImageDimensions | null>(null);
   const [prompt, setPrompt] = useState("");
   const [seed, setSeed] = useState("1234");
   const [guidanceScale, setGuidanceScale] = useState(7.5);
   const [numInferenceSteps, setNumInferenceSteps] = useState(100);
   const [immunize, setImmunize] = useState(false);
+  const [immunizationProfile, setImmunizationProfile] = useState<ImmunizationProfile>("stable_diffusion");
+  const [workingResolution, setWorkingResolution] = useState<WorkingResolution>("1024");
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>("png");
+  const [losslessOutput, setLosslessOutput] = useState(true);
   const [brushSize, setBrushSize] = useState(36);
   const [localError, setLocalError] = useState<string | null>(null);
 
   useEffect(() => {
     return () => {
-      if (previewUrl) {
-        URL.revokeObjectURL(previewUrl);
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+        previewUrlRef.current = null;
       }
     };
-  }, [previewUrl]);
+  }, []);
+
+  const replacePreviewUrl = (nextPreviewUrl: string | null) => {
+    if (previewUrlRef.current && previewUrlRef.current !== nextPreviewUrl) {
+      URL.revokeObjectURL(previewUrlRef.current);
+    }
+    previewUrlRef.current = nextPreviewUrl;
+    setPreviewUrl(nextPreviewUrl);
+  };
 
   const handleFileSelect = async (file: File) => {
     setLocalError(null);
 
     try {
-      const prepared = await createEditorImage(file);
-      setPreviewUrl((current) => {
-        if (current) {
-          URL.revokeObjectURL(current);
-        }
-        return prepared.previewUrl;
-      });
-      setPreparedImage(prepared.preparedFile);
-      setEditorDimensions(prepared.dimensions);
+      const inspected = await inspectEditorImage(file);
+      replacePreviewUrl(inspected.previewUrl);
+      setSelectedImage(file);
+      setEditorDimensions(inspected.dimensions);
     } catch (caughtError) {
-      setPreparedImage(null);
+      setSelectedImage(null);
       setEditorDimensions(null);
-      setPreviewUrl((current) => {
-        if (current) {
-          URL.revokeObjectURL(current);
-        }
-        return null;
-      });
+      replacePreviewUrl(null);
       setLocalError(
         caughtError instanceof Error ? caughtError.message : "Unable to prepare the image.",
       );
@@ -63,7 +70,7 @@ export default function EditorWorkspace({ onProcess, isLoading, error }: EditorW
   };
 
   const handleSubmit = async () => {
-    if (!preparedImage) {
+    if (!selectedImage) {
       setLocalError("Upload an image before running the pipeline.");
       return;
     }
@@ -76,13 +83,17 @@ export default function EditorWorkspace({ onProcess, isLoading, error }: EditorW
 
     setLocalError(null);
     await onProcess({
-      image: preparedImage,
+      image: selectedImage,
       mask: maskFile,
       prompt,
       seed,
       guidanceScale,
       numInferenceSteps,
       immunize,
+      immunizationProfile,
+      workingResolution,
+      outputFormat,
+      losslessOutput,
     });
   };
 
@@ -90,7 +101,7 @@ export default function EditorWorkspace({ onProcess, isLoading, error }: EditorW
     maskEditorRef.current?.clearMask();
   };
 
-  const combinedError = error ?? localError;
+  const combinedError = localError ?? error;
 
   return (
     <Card className="gap-6">
@@ -128,7 +139,11 @@ export default function EditorWorkspace({ onProcess, isLoading, error }: EditorW
             <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--foreground)" }}>
               Source image
             </h3>
-            <UploadZone onFileSelect={handleFileSelect} preview={previewUrl} />
+            <UploadZone
+              onFileSelect={handleFileSelect}
+              onError={setLocalError}
+              preview={previewUrl}
+            />
           </div>
 
           <div className="space-y-4">
@@ -226,10 +241,92 @@ export default function EditorWorkspace({ onProcess, isLoading, error }: EditorW
                   Immunize before editing
                 </span>
                 <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-                  Returns both the immunized image and the edited result.
+                  First generates a protected image, then runs the edit against that protected version.
                 </span>
               </div>
             </label>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <label className="text-sm" style={{ color: "var(--foreground)" }}>
+                <span className="block font-semibold mb-2">Working resolution</span>
+                <select
+                  value={workingResolution}
+                  onChange={(event) => setWorkingResolution(event.target.value as WorkingResolution)}
+                  className="w-full rounded-2xl px-4 py-3"
+                  style={{
+                    backgroundColor: "var(--card)",
+                    color: "var(--foreground)",
+                    border: "1px solid var(--border)",
+                  }}
+                >
+                  <option value="512">512 px (legacy fast)</option>
+                  <option value="1024">1024 px (recommended)</option>
+                  <option value="original">Original size (heaviest)</option>
+                </select>
+              </label>
+              <label className="text-sm" style={{ color: "var(--foreground)" }}>
+                <span className="block font-semibold mb-2">Output format</span>
+                <select
+                  value={outputFormat}
+                  onChange={(event) => setOutputFormat(event.target.value as OutputFormat)}
+                  className="w-full rounded-2xl px-4 py-3"
+                  style={{
+                    backgroundColor: "var(--card)",
+                    color: "var(--foreground)",
+                    border: "1px solid var(--border)",
+                  }}
+                >
+                  <option value="png">PNG</option>
+                  <option value="webp">WebP</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <label className="text-sm" style={{ color: "var(--foreground)" }}>
+                <span className="block font-semibold mb-2">Immunization profile</span>
+                <select
+                  value={immunizationProfile}
+                  onChange={(event) => setImmunizationProfile(event.target.value as ImmunizationProfile)}
+                  disabled={!immunize}
+                  className="w-full rounded-2xl px-4 py-3"
+                  style={{
+                    backgroundColor: "var(--card)",
+                    color: "var(--foreground)",
+                    border: "1px solid var(--border)",
+                    opacity: immunize ? 1 : 0.65,
+                  }}
+                >
+                  <option value="stable_diffusion">Stable Diffusion</option>
+                  <option value="nano_banana_experimental">
+                    Nano Banana experimental (temporarily delegates to Stable Diffusion)
+                  </option>
+                </select>
+                <span className="block text-xs mt-2" style={{ color: "var(--muted-foreground)" }}>
+                  Selects one defense profile for the immunization step. Profiles are not combined.
+                </span>
+              </label>
+
+              <label
+                className="flex items-center gap-3 rounded-2xl px-4 py-3"
+                style={{ backgroundColor: "var(--muted)", border: "1px solid var(--border)" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={losslessOutput}
+                  onChange={(event) => setLosslessOutput(event.target.checked)}
+                  disabled={outputFormat !== "webp"}
+                />
+                <div>
+                  <span className="block text-sm font-semibold" style={{ color: "var(--foreground)" }}>
+                    Lossless output
+                  </span>
+                  <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+                    Applies to WebP. PNG stays lossless automatically.
+                  </span>
+                </div>
+              </label>
+            </div>
           </div>
         </div>
 
@@ -249,6 +346,7 @@ export default function EditorWorkspace({ onProcess, isLoading, error }: EditorW
                 backgroundColor: "rgba(212,24,61,0.08)",
                 color: "var(--destructive)",
                 border: "1px solid rgba(212,24,61,0.18)",
+                whiteSpace: "pre-line",
               }}
             >
               {combinedError}
@@ -256,13 +354,13 @@ export default function EditorWorkspace({ onProcess, isLoading, error }: EditorW
           ) : null}
 
           <div className="flex flex-col sm:flex-row gap-3">
-            <Button fullWidth onClick={handleSubmit} disabled={isLoading || !preparedImage}>
+            <Button fullWidth onClick={handleSubmit} disabled={isLoading || !selectedImage}>
               <span className="inline-flex items-center gap-2">
                 <Sparkles className="w-4 h-4" />
                 {isLoading ? "Processing image..." : "Run PhotoGuard API"}
               </span>
             </Button>
-            <Button fullWidth variant="ghost" onClick={handleClearMask} disabled={!preparedImage || isLoading}>
+            <Button fullWidth variant="ghost" onClick={handleClearMask} disabled={!selectedImage || isLoading}>
               Clear mask
             </Button>
           </div>

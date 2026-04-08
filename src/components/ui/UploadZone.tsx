@@ -3,22 +3,48 @@ import { Upload } from "lucide-react";
 
 interface UploadZoneProps {
   onFileSelect: (file: File) => void;
+  onError?: (message: string) => void;
   preview: string | null;
 }
 
-const ACCEPTED = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const ACCEPTED_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".bmp",
+  ".tif",
+  ".tiff",
+]);
+const FILE_INPUT_ACCEPT = "image/*,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff";
 
-export default function UploadZone({ onFileSelect, preview }: UploadZoneProps) {
+function hasAcceptedExtension(fileName: string) {
+  const lowerName = fileName.toLowerCase();
+  return Array.from(ACCEPTED_EXTENSIONS).some((extension) => lowerName.endsWith(extension));
+}
+
+export default function UploadZone({ onFileSelect, onError, preview }: UploadZoneProps) {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = useCallback(
     (file: File) => {
-      if (ACCEPTED.includes(file.type)) {
+      const looksLikeImage = file.type.startsWith("image/") || hasAcceptedExtension(file.name);
+      if (looksLikeImage) {
         onFileSelect(file);
+        if (inputRef.current) {
+          inputRef.current.value = "";
+        }
+        return;
+      }
+
+      onError?.("That file does not look like a supported image. Try PNG, JPG, WebP, BMP, or TIFF.");
+      if (inputRef.current) {
+        inputRef.current.value = "";
       }
     },
-    [onFileSelect],
+    [onError, onFileSelect],
   );
 
   const handleDrop = useCallback(
@@ -59,8 +85,11 @@ export default function UploadZone({ onFileSelect, preview }: UploadZoneProps) {
       <input
         ref={inputRef}
         type="file"
-        accept={ACCEPTED.join(",")}
+        accept={FILE_INPUT_ACCEPT}
         className="hidden"
+        onClick={(event) => {
+          event.currentTarget.value = "";
+        }}
         onChange={(event) => {
           const file = event.target.files?.[0];
           if (file) {
@@ -88,7 +117,7 @@ export default function UploadZone({ onFileSelect, preview }: UploadZoneProps) {
               Drag and drop an image here, or <span style={{ color: "var(--accent)" }}>click to select</span>
             </p>
             <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
-              PNG, JPG, GIF, or WEBP up to 10MB
+              PNG, JPG, GIF, WEBP, BMP, or TIFF
             </p>
           </div>
         </div>

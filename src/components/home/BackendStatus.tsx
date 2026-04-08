@@ -7,7 +7,11 @@ import type { HealthResponse } from "../../types/api";
 
 type Status = "checking" | "online" | "offline";
 
-export default function BackendStatus() {
+interface BackendStatusProps {
+  suspend?: boolean;
+}
+
+export default function BackendStatus({ suspend = false }: BackendStatusProps) {
   const [status, setStatus] = useState<Status>("checking");
   const [lastChecked, setLastChecked] = useState<string>("");
   const [details, setDetails] = useState<HealthResponse | null>(null);
@@ -15,12 +19,18 @@ export default function BackendStatus() {
   useEffect(() => {
     let cancelled = false;
 
+    if (suspend) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
     const runCheck = async () => {
       setLastChecked(new Date().toLocaleTimeString());
       setStatus("checking");
 
       try {
-        const response = await checkHealth(AbortSignal.timeout(3000));
+        const response = await checkHealth(AbortSignal.timeout(5000));
         if (cancelled) {
           return;
         }
@@ -43,7 +53,7 @@ export default function BackendStatus() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, []);
+  }, [suspend]);
 
   const StatusIcon =
     status === "online" ? CheckCircle2 : status === "checking" ? LoaderCircle : XCircle;
@@ -71,7 +81,7 @@ export default function BackendStatus() {
         </div>
         {lastChecked ? (
           <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>
-            Last checked: {lastChecked}
+            {suspend ? "Health checks paused during an active request." : `Last checked: ${lastChecked}`}
           </p>
         ) : null}
         {details ? (
