@@ -1,4 +1,4 @@
-import { Shield, ScanFace, Workflow } from "lucide-react";
+import { MessagesSquare, ScanFace, Shield } from "lucide-react";
 import FeatureCard from "../ui/FeatureCard";
 
 const FEATURES = [
@@ -15,10 +15,10 @@ const FEATURES = [
       "This dockerized workspace talks to its own API layer instead of embedding the original Gradio application.",
   },
   {
-    icon: <Workflow className="w-5 h-5" />,
-    title: "Safe iteration path",
+    icon: <MessagesSquare className="w-5 h-5" />,
+    title: "Readable request feedback",
     description:
-      "The original PhotoGuard demo stays untouched while this deployment bundle packages the newer frontend and backend flow.",
+      "Each `/process` call now returns user-friendly validation, progress, and success messages that the packaged UI shows after every run.",
   },
 ];
 

@@ -7,6 +7,7 @@
     "dev": "vite",
     "dev:frontend": "vite",
     "dev:api": "python -m uvicorn app.main:app --app-dir ../backend --reload --port 8000",
+    "dev:api:gpu": "python -m uvicorn app.main:app --app-dir ../backend --port 8000",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

@@ -15,6 +15,7 @@ Then they only need Docker.
 
 - `frontend/`: copied React app source from the integrated UI
 - `backend/`: copied FastAPI app plus local copies of `immunization.py` and `utils.py`
+- `backend/app/feedback.py`: shared feedback helpers for validation, confirmation messages, and UI-friendly status logs
 - `proxy/`: nginx config plus the frontend production image build
 - `build-images.sh`: builds both Docker images with plain Docker
 - `run-stack.sh`: runs the full stack with plain Docker
@@ -25,6 +26,27 @@ Then they only need Docker.
 - `push-ghcr.sh`: tags and pushes both images to GitHub Container Registry
 - `pull-ghcr.sh`: pulls both images back from GitHub Container Registry
 - `docker-compose.yml`: optional Compose setup if Compose is available
+
+## Feedback flow
+
+The dockerized workspace now includes the same feedback/status flow as the integrated workspace.
+
+- The backend validates uploaded source and mask images with user-friendly status messages.
+- Successful `/process` requests return a `statusText` log alongside the generated images.
+- Failed requests return the same feedback log in the error response so the packaged UI can show what went wrong.
+- The output panel includes a "Processing feedback" block that displays validation, progress, and confirmation messages after each run.
+- The API also exposes `/progress/{request_id}` so the packaged UI can poll live request progress and show immunization iteration metrics while a request is still running.
+
+## Quality and profile controls
+
+The packaged UI now exposes the same backend options as the integrated workspace:
+
+- `Immunization profile`: `stable_diffusion` or `nano_banana_experimental`
+- `Working resolution`: `512`, `1024`, or `original`
+- `Output format`: `PNG` or `WebP`
+- `Lossless output`: applies when `WebP` is selected
+
+The backend composites generated edits back onto the original full-resolution upload so untouched regions keep their original quality, and the default output path now supports PNG or lossless WebP.
 
 ## Easiest local flow
 
@@ -47,6 +69,13 @@ Run with GPU:
 ```bash
 cd /home/tobi/photoguard/dockerized
 ./run-stack-gpu.sh
+```
+
+If you are debugging the packaged frontend/backend locally without Docker, prefer the non-reload API script during CUDA work:
+
+```bash
+cd /home/tobi/photoguard/dockerized/frontend
+npm run dev:api:gpu
 ```
 
 Stop:

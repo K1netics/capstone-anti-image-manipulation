@@ -6,6 +6,11 @@ export interface EditorImageDimensions {
   height: number;
 }
 
+export interface InspectedEditorImage {
+  previewUrl: string;
+  dimensions: EditorImageDimensions;
+}
+
 function snapDimension(value: number) {
   const safeValue = Math.max(DIMENSION_MULTIPLE, Math.floor(value));
   return Math.max(
@@ -48,7 +53,20 @@ function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number)
         resolve(blob);
         return;
       }
-      reject(new Error("Unable to export image data."));
+      try {
+        const dataUrl = canvas.toDataURL(type, quality);
+        const [header, encoded] = dataUrl.split(",", 2);
+        const mimeMatch = /data:([^;]+)/.exec(header);
+        const mimeType = mimeMatch?.[1] ?? type;
+        const binary = atob(encoded);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) {
+          bytes[index] = binary.charCodeAt(index);
+        }
+        resolve(new Blob([bytes], { type: mimeType }));
+      } catch {
+        reject(new Error("Unable to export image data."));
+      }
     }, type, quality);
   });
 }
@@ -84,6 +102,21 @@ export async function createEditorImage(file: File) {
     };
   } finally {
     URL.revokeObjectURL(sourceUrl);
+  }
+}
+
+export async function inspectEditorImage(file: File): Promise<InspectedEditorImage> {
+  const sourceUrl = URL.createObjectURL(file);
+
+  try {
+    const image = await loadImage(sourceUrl);
+    return {
+      previewUrl: sourceUrl,
+      dimensions: calculateEditorDimensions(image.width, image.height),
+    };
+  } catch (error) {
+    URL.revokeObjectURL(sourceUrl);
+    throw error;
   }
 }
 
