@@ -1,73 +1,98 @@
-# React + TypeScript + Vite
+# PhotoGuard Workspace Audit
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This repository currently contains one tracked legacy app plus several newer workspace copies for integration and deployment experiments.
 
-Currently, two official plugins are available:
+## Current sections
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- `backend/`
+  - Original tracked Gradio-based PhotoGuard app.
+  - Uses local sample images in `backend/images/`.
+- `artifacts/`
+  - Local model artifacts and frozen dependency snapshots.
+  - Large local-only data directory; ignored by git.
+- `intergrated/`
+  - React frontend + FastAPI backend development workspace.
+  - Now includes integrated request feedback/status logs surfaced from the API to the UI.
+  - Best candidate for the main app if you want a normal frontend/backend architecture.
+- `feedback.py` and `run_feedback_demo.py`
+  - Shared feedback prototype for user-facing validation and confirmation messages.
+  - `feedback.py` now re-exports the integrated workspace helper so the standalone demo and integrated app use the same message format.
+- `dockerized/`
+  - Deployment bundle with Dockerfiles, nginx proxy, Compose files, and copied app code.
+  - Best candidate for packaged deployment.
+- `gcollab/`
+  - Backend-only FastAPI bundle for Google Colab.
+- `better-pytorch-cu124/`
+  - Backend-only FastAPI bundle for a remote GPU machine that already has PyTorch installed.
+- `frontend-src/`
+  - Earlier frontend-only prototype.
+  - Talks to `http://localhost:8000/embed`, which does not match the newer `/process` API flow.
+- Root `src/`, `public/`, `package.json`, `vite.config.ts`
+  - Leftover Vite starter app.
+  - Not the real PhotoGuard frontend.
 
-## React Compiler
+## What looks complete
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- `backend/`: legacy standalone backend UI
+- `intergrated/`: frontend/backend integration workspace
+- `dockerized/`: dockerized deployment workspace
+- `gcollab/`: backend-only Colab workspace
+- `better-pytorch-cu124/`: backend-only remote GPU workspace
 
-## Expanding the ESLint configuration
+## What looks unnecessary or ready to archive
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+- Root Vite starter files:
+  - `src/`
+  - `public/`
+  - `index.html`
+  - `package.json`
+  - `package-lock.json`
+  - `tsconfig*.json`
+  - `vite.config.ts`
+  - `eslint.config.js`
+- `frontend-src/`
+  - Superseded by `intergrated/`
+- Root `Dockerfile`
+  - Older one-off container path; `dockerized/` is more complete
+- Generated or local-only directories:
+  - `intergrated/node_modules/`
+  - `intergrated/.venv/`
+  - `__pycache__/`
+  - `.gradio/`
+  - `demo/.gradio/`
+- Nested repos that will complicate cleanup if you want one git repo:
+  - `frontend-src/.git/`
+  - `intergrated/.git/`
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+## Recommended target structure
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+If you want to clean this repo up without losing work, this is the simplest direction:
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```text
+photoguard/
+  apps/
+    legacy-gradio/
+    integrated-web/
+    integrated-api/
+  deploy/
+    docker/
+    colab-backend/
+    remote-gpu-backend/
+  artifacts/
+  README.md
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Recommended cleanup order
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+1. Keep `intergrated/` as the main development app.
+2. Keep `dockerized/` as the deployment package.
+3. Keep `gcollab/` and `better-pytorch-cu124/` only if you still need those deployment targets.
+4. Archive or delete `frontend-src/`, the root Vite starter files, and the old root `Dockerfile` if they are no longer needed.
+5. Remove generated directories before committing: `node_modules`, `.venv`, `__pycache__`, `.gradio`.
+6. Rename `intergrated/` to `integrated/` once you are ready to update hard-coded paths and docs.
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+## Verification notes
+
+- The tracked legacy backend now parses again after fixing a syntax error in `backend/app.py`.
+- The FastAPI entrypoints in `intergrated/`, `dockerized/`, `gcollab/`, and `better-pytorch-cu124/` compile successfully.
+- Frontend build verification is incomplete in this shell because the local Node version is `v12.22.9`, which is too old for the current TypeScript/Vite toolchain, and some workspaces do not have dependencies installed.

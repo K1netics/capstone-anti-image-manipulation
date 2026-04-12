@@ -1,0 +1,17 @@
+node_modules
+dist
+.tools
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.DS_Store
+tsconfig.tsbuildinfo
+artifacts/local_inpaint_model
+artifacts/sdxl_local_inpaint_model
+artifacts/*.zip

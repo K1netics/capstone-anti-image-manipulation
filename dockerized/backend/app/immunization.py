@@ -9,7 +9,7 @@ from PIL import Image, ImageFilter, ImageOps
 from tqdm import tqdm
 from torchvision.transforms import ToPILImage
 
-from utils import preprocess, prepare_mask_and_masked_image, recover_image, resize_and_crop
+from .utils import preprocess, prepare_mask_and_masked_image, recover_image, resize_and_crop
 
 topil = ToPILImage()
 ProgressCallback = Callable[[dict[str, object]], None]

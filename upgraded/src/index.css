@@ -1,0 +1,96 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-size: 16px;
+  --background: #faf7ff;
+  --foreground: #2b2d42;
+  --card: #ffffff;
+  --card-foreground: #2b2d42;
+  --primary: #f8bbd9;
+  --primary-foreground: #2b2d42;
+  --secondary: #cdb4db;
+  --secondary-foreground: #2b2d42;
+  --muted: #f0eef5;
+  --muted-foreground: #6b6d7f;
+  --accent: #9f86c0;
+  --accent-foreground: #ffffff;
+  --destructive: #d4183d;
+  --border: rgba(159, 134, 192, 0.2);
+  --ring: #9f86c0;
+  --radius: 1rem;
+  --font-weight-medium: 500;
+  --font-weight-normal: 400;
+}
+
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+    border: none;
+  }
+
+  html {
+    font-size: var(--font-size);
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: 'DM Sans', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a {
+    color: inherit;
+  }
+
+  #root {
+    min-height: 100vh;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+    font-weight: var(--font-weight-medium);
+    line-height: 1.15;
+  }
+
+  h2 {
+    font-size: 1.25rem;
+    font-weight: var(--font-weight-medium);
+    line-height: 1.3;
+  }
+
+  h3 {
+    font-size: 1.125rem;
+    font-weight: var(--font-weight-medium);
+    line-height: 1.4;
+  }
+
+  h4,
+  button,
+  input,
+  textarea {
+    font-size: 1rem;
+    line-height: 1.5;
+  }
+
+  button {
+    font-weight: var(--font-weight-medium);
+  }
+
+  input,
+  textarea {
+    font-weight: var(--font-weight-normal);
+    outline: none;
+  }
+
+  input:focus,
+  textarea:focus {
+    box-shadow: 0 0 0 3px rgba(159, 134, 192, 0.18);
+  }
+}
