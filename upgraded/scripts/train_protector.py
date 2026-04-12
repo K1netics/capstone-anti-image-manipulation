@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -22,16 +22,26 @@ if str(ROOT_DIR) not in sys.path:
 
 from backend.immunization import (  # noqa: E402
     ImmunizationConfig,
+    apply_light_compression_proxy,
+    apply_sharpen_proxy,
+    apply_updown_scale_proxy,
     build_identity_drift_view,
     compute_masked_descriptor,
     descriptor_similarity,
     normalize_map,
+    rgb_to_luma,
+    sobel_magnitude,
 )
 
 try:  # pragma: no cover - optional dependency in local envs
     import lpips  # type: ignore
 except ImportError:  # pragma: no cover
     lpips = None
+
+try:  # pragma: no cover - optional dependency in local envs
+    from facenet_pytorch import InceptionResnetV1  # type: ignore
+except ImportError:  # pragma: no cover
+    InceptionResnetV1 = None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -63,6 +73,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--lpips-weight", type=float, default=0.08, help="Weight for LPIPS fidelity if available.")
     parser.add_argument("--face-identity-weight", type=float, default=0.1, help="Weight for portrait face-identity confusion.")
     parser.add_argument("--face-drift-weight", type=float, default=0.05, help="Weight for drift-view face identity confusion.")
+    parser.add_argument(
+        "--face-id-backend",
+        choices=("auto", "none", "facenet"),
+        default="auto",
+        help="Real face-ID encoder backend. 'auto' uses FaceNet if facenet-pytorch is installed.",
+    )
+    parser.add_argument("--real-face-id-weight", type=float, default=0.12, help="Weight for real face-ID confusion loss.")
+    parser.add_argument("--real-face-id-drift-weight", type=float, default=0.06, help="Weight for purified/drifted real face-ID confusion.")
+    parser.add_argument("--family-balance-alpha", type=float, default=1.0, help="Inverse-frequency balancing strength for prompt families.")
+    parser.add_argument("--purification-strength", type=float, default=0.18, help="Strength of cleanup/purification proxy transforms.")
+    parser.add_argument("--purification-consistency-weight", type=float, default=0.16, help="Weight for matching teacher outputs after purification transforms.")
+    parser.add_argument("--purification-face-weight", type=float, default=0.05, help="Weight for face identity confusion under purification transforms.")
+    parser.add_argument("--selective-visibility-weight", type=float, default=0.04, help="Weight for hiding perturbations in textured/non-face regions.")
     parser.add_argument("--visual-tv-weight", type=float, default=0.01, help="Total-variation regularizer on the perturbation.")
     parser.add_argument("--delta-l2-weight", type=float, default=0.02, help="L2 energy regularizer on the perturbation.")
     parser.add_argument("--disable-lpips", action="store_true", help="Disable LPIPS even if installed.")
@@ -149,12 +172,22 @@ class TeacherDataset(Dataset):
         image_size: int,
         sampling_mode: str,
         seed: int,
+        family_balance_alpha: float = 0.0,
     ) -> None:
         self.groups = groups
         self.image_size = image_size
         self.sampling_mode = sampling_mode
         self.seed = seed
         self.flat_rows = [row for group in groups for row in group]
+        self.family_balance_alpha = max(0.0, float(family_balance_alpha))
+        family_counts: dict[str, int] = {}
+        for row in self.flat_rows:
+            family = str(row.get("promptFamily", "general"))
+            family_counts[family] = family_counts.get(family, 0) + 1
+        self.family_weights = {
+            family: (1.0 / float(count)) ** self.family_balance_alpha
+            for family, count in family_counts.items()
+        }
 
     def __len__(self) -> int:
         if self.sampling_mode == "grouped_prompts":
@@ -164,7 +197,18 @@ class TeacherDataset(Dataset):
     def _select_row(self, index: int) -> dict[str, Any]:
         if self.sampling_mode == "grouped_prompts":
             group = self.groups[index]
-            choice = torch.randint(len(group), size=(1,)).item()
+            if self.family_balance_alpha > 0:
+                weights = torch.tensor(
+                    [
+                        self.family_weights.get(str(row.get("promptFamily", "general")), 1.0)
+                        for row in group
+                    ],
+                    dtype=torch.float32,
+                )
+                weights = weights / weights.sum().clamp_min(1e-6)
+                choice = torch.multinomial(weights, num_samples=1).item()
+            else:
+                choice = torch.randint(len(group), size=(1,)).item()
             return group[choice]
         return self.flat_rows[index]
 
@@ -281,6 +325,85 @@ def _build_face_proxy_map(image_tensor: torch.Tensor, protected_mask: torch.Tens
     return normalize_map(face_proxy_map * protected_mask)
 
 
+def _build_visibility_weight_map(
+    image_tensor: torch.Tensor,
+    protected_mask: torch.Tensor,
+    face_mask: torch.Tensor,
+) -> torch.Tensor:
+    gray = rgb_to_luma(image_tensor.to(dtype=torch.float32))
+    edge_strength = normalize_map(sobel_magnitude(gray))
+    low_texture = (1.0 - edge_strength).clamp(0.0, 1.0)
+    face_priority = normalize_map(face_mask)
+    smooth_protected = normalize_map(low_texture * protected_mask)
+    visibility = (0.7 * face_priority + 0.3 * smooth_protected) * protected_mask
+    return visibility.clamp(0.0, 1.0)
+
+
+def _extract_face_crops(
+    image_tensor: torch.Tensor,
+    face_mask: torch.Tensor,
+    *,
+    crop_size: int = 160,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    crops: list[torch.Tensor] = []
+    valid_flags: list[torch.Tensor] = []
+    batch_size, _, height, width = image_tensor.shape
+    for batch_index in range(batch_size):
+        mask = face_mask[batch_index : batch_index + 1]
+        binary = mask[0, 0] > 0.15
+        if not torch.any(binary):
+            crops.append(torch.zeros((3, crop_size, crop_size), device=image_tensor.device, dtype=image_tensor.dtype))
+            valid_flags.append(torch.zeros((), device=image_tensor.device, dtype=torch.float32))
+            continue
+        ys, xs = torch.where(binary)
+        y0 = int(ys.min().item())
+        y1 = int(ys.max().item()) + 1
+        x0 = int(xs.min().item())
+        x1 = int(xs.max().item()) + 1
+        pad_y = max(2, int(round((y1 - y0) * 0.15)))
+        pad_x = max(2, int(round((x1 - x0) * 0.15)))
+        y0 = max(0, y0 - pad_y)
+        y1 = min(height, y1 + pad_y)
+        x0 = max(0, x0 - pad_x)
+        x1 = min(width, x1 + pad_x)
+        crop = image_tensor[batch_index : batch_index + 1, :, y0:y1, x0:x1]
+        crop = F.interpolate(crop, size=(crop_size, crop_size), mode="bilinear", align_corners=False)
+        crops.append(crop[0])
+        valid_flags.append(torch.ones((), device=image_tensor.device, dtype=torch.float32))
+    return torch.stack(crops, dim=0), torch.stack(valid_flags, dim=0)
+
+
+def _maybe_build_face_id_model(backend: str, device: torch.device) -> nn.Module | None:
+    if backend == "none":
+        return None
+    if backend in {"auto", "facenet"} and InceptionResnetV1 is not None:
+        model = InceptionResnetV1(pretrained="vggface2").eval().to(device=device)
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        return model
+    return None
+
+
+def _compute_real_face_id_similarity(
+    model: nn.Module | None,
+    source_image: torch.Tensor,
+    compare_image: torch.Tensor,
+    face_mask: torch.Tensor,
+) -> torch.Tensor:
+    if model is None:
+        return source_image.new_tensor(0.0)
+    source_crops, valid = _extract_face_crops(source_image, face_mask)
+    compare_crops, _ = _extract_face_crops(compare_image, face_mask)
+    if float(valid.sum().item()) <= 0:
+        return source_image.new_tensor(0.0)
+    source_crops = (source_crops - 0.5) / 0.5
+    compare_crops = (compare_crops - 0.5) / 0.5
+    source_embeds = F.normalize(model(source_crops), dim=1)
+    compare_embeds = F.normalize(model(compare_crops), dim=1)
+    similarities = F.cosine_similarity(source_embeds, compare_embeds, dim=1)
+    return (similarities * valid).sum() / valid.sum().clamp_min(1.0)
+
+
 def _maybe_build_lpips(disabled: bool, device: torch.device) -> nn.Module | None:
     if disabled or lpips is None:
         return None
@@ -302,6 +425,18 @@ def _make_drift_config() -> ImmunizationConfig:
     )
 
 
+def _build_purification_view(image_tensor: torch.Tensor, strength: float) -> torch.Tensor:
+    strength = max(0.0, float(strength))
+    if strength <= 0.0:
+        return image_tensor
+    purified = apply_light_compression_proxy(image_tensor, min(0.12, 0.02 + 0.9 * strength))
+    purified = apply_updown_scale_proxy(purified, scale=max(0.6, 1.0 - 0.85 * strength))
+    blur = F.avg_pool2d(purified, kernel_size=3, stride=1, padding=1)
+    purified = purified.lerp(blur, min(0.35, 1.2 * strength))
+    purified = apply_sharpen_proxy(purified, strength=min(0.12, 0.45 * strength))
+    return purified.clamp(0.0, 1.0)
+
+
 def _evaluate(
     model: nn.Module,
     loader: DataLoader,
@@ -309,6 +444,7 @@ def _evaluate(
     device: torch.device,
     max_epsilon: float,
     lpips_model: nn.Module | None,
+    face_id_model: nn.Module | None,
     drift_config: ImmunizationConfig,
     args: argparse.Namespace,
 ) -> dict[str, float]:
@@ -324,6 +460,11 @@ def _evaluate(
         "lpips": 0.0,
         "face_identity": 0.0,
         "face_drift": 0.0,
+        "real_face_id": 0.0,
+        "real_face_id_drift": 0.0,
+        "purification": 0.0,
+        "purification_face": 0.0,
+        "selective_visibility": 0.0,
         "visual_tv": 0.0,
         "delta_l2": 0.0,
     }
@@ -360,7 +501,32 @@ def _evaluate(
                 drift_face_descriptor = compute_masked_descriptor(drift_view, face_mask)
                 face_drift_loss = descriptor_similarity(drift_face_descriptor, source_face_descriptor)
 
+            real_face_id_loss = _compute_real_face_id_similarity(
+                face_id_model,
+                source,
+                pred_protected,
+                face_mask,
+            )
+            purified_pred = _build_purification_view(pred_protected, args.purification_strength)
+            purified_teacher = _build_purification_view(teacher, args.purification_strength)
+            purification_loss = F.l1_loss(purified_pred, purified_teacher)
+            purified_face_loss = source.new_tensor(0.0)
+            if float(face_mask.mean().item()) > 1e-5:
+                purified_face_loss = descriptor_similarity(
+                    compute_masked_descriptor(purified_pred, face_mask),
+                    compute_masked_descriptor(source, face_mask),
+                )
+
+            real_face_id_drift_loss = _compute_real_face_id_similarity(
+                face_id_model,
+                source,
+                purified_pred,
+                face_mask,
+            )
+
             masked_delta = pred_delta * protected_mask
+            visibility_map = _build_visibility_weight_map(source, protected_mask, face_mask)
+            selective_visibility_loss = (masked_delta.abs() * visibility_map).mean()
             visual_tv_loss = _total_variation(masked_delta)
             delta_l2_loss = masked_delta.square().mean()
 
@@ -371,6 +537,11 @@ def _evaluate(
                 + args.lpips_weight * lpips_loss
                 + args.face_identity_weight * face_identity_loss
                 + args.face_drift_weight * face_drift_loss
+                + args.real_face_id_weight * real_face_id_loss
+                + args.real_face_id_drift_weight * real_face_id_drift_loss
+                + args.purification_consistency_weight * purification_loss
+                + args.purification_face_weight * purified_face_loss
+                + args.selective_visibility_weight * selective_visibility_loss
                 + args.visual_tv_weight * visual_tv_loss
                 + args.delta_l2_weight * delta_l2_loss
             )
@@ -382,6 +553,11 @@ def _evaluate(
             metrics["lpips"] += float(lpips_loss.item())
             metrics["face_identity"] += float(face_identity_loss.item())
             metrics["face_drift"] += float(face_drift_loss.item())
+            metrics["real_face_id"] += float(real_face_id_loss.item())
+            metrics["real_face_id_drift"] += float(real_face_id_drift_loss.item())
+            metrics["purification"] += float(purification_loss.item())
+            metrics["purification_face"] += float(purified_face_loss.item())
+            metrics["selective_visibility"] += float(selective_visibility_loss.item())
             metrics["visual_tv"] += float(visual_tv_loss.item())
             metrics["delta_l2"] += float(delta_l2_loss.item())
 
@@ -412,6 +588,7 @@ def main() -> int:
         image_size=args.image_size,
         sampling_mode=args.sampling_mode,
         seed=args.seed,
+        family_balance_alpha=args.family_balance_alpha,
     )
     val_dataset = None
     if val_groups:
@@ -420,12 +597,27 @@ def main() -> int:
             image_size=args.image_size,
             sampling_mode="flat",
             seed=args.seed + 1,
+            family_balance_alpha=0.0,
         )
+
+    train_sampler = None
+    train_shuffle = args.sampling_mode != "grouped_prompts"
+    if args.sampling_mode == "flat" and args.family_balance_alpha > 0:
+        sample_weights = [
+            train_dataset.family_weights.get(
+                str(row.get("promptFamily", "general")),
+                1.0,
+            )
+            for row in train_dataset.flat_rows
+        ]
+        train_sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+        train_shuffle = False
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=args.sampling_mode != "grouped_prompts",
+        shuffle=train_shuffle,
+        sampler=train_sampler,
         num_workers=args.num_workers,
         pin_memory=torch.cuda.is_available(),
     )
@@ -448,6 +640,8 @@ def main() -> int:
     )
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp and device.type == "cuda")
     lpips_model = _maybe_build_lpips(args.disable_lpips, device)
+    face_id_model = _maybe_build_face_id_model(args.face_id_backend, device)
+    effective_face_id_backend = args.face_id_backend if face_id_model is not None else "none"
     drift_config = _make_drift_config()
 
     best_val = math.inf
@@ -464,6 +658,11 @@ def main() -> int:
             "lpips": 0.0,
             "face_identity": 0.0,
             "face_drift": 0.0,
+            "real_face_id": 0.0,
+            "real_face_id_drift": 0.0,
+            "purification": 0.0,
+            "purification_face": 0.0,
+            "selective_visibility": 0.0,
             "visual_tv": 0.0,
             "delta_l2": 0.0,
         }
@@ -502,7 +701,32 @@ def main() -> int:
                     drift_face_descriptor = compute_masked_descriptor(drift_view, face_mask)
                     face_drift_loss = descriptor_similarity(drift_face_descriptor, source_face_descriptor)
 
+                real_face_id_loss = _compute_real_face_id_similarity(
+                    face_id_model,
+                    source,
+                    pred_protected,
+                    face_mask,
+                )
+                purified_pred = _build_purification_view(pred_protected, args.purification_strength)
+                purified_teacher = _build_purification_view(teacher, args.purification_strength)
+                purification_loss = F.l1_loss(purified_pred, purified_teacher)
+                purified_face_loss = source.new_tensor(0.0)
+                if float(face_mask.mean().item()) > 1e-5:
+                    purified_face_loss = descriptor_similarity(
+                        compute_masked_descriptor(purified_pred, face_mask),
+                        compute_masked_descriptor(source, face_mask),
+                    )
+
+                real_face_id_drift_loss = _compute_real_face_id_similarity(
+                    face_id_model,
+                    source,
+                    purified_pred,
+                    face_mask,
+                )
+
                 masked_delta = pred_delta * protected_mask
+                visibility_map = _build_visibility_weight_map(source, protected_mask, face_mask)
+                selective_visibility_loss = (masked_delta.abs() * visibility_map).mean()
                 visual_tv_loss = _total_variation(masked_delta)
                 delta_l2_loss = masked_delta.square().mean()
 
@@ -513,6 +737,11 @@ def main() -> int:
                     + args.lpips_weight * lpips_loss
                     + args.face_identity_weight * face_identity_loss
                     + args.face_drift_weight * face_drift_loss
+                    + args.real_face_id_weight * real_face_id_loss
+                    + args.real_face_id_drift_weight * real_face_id_drift_loss
+                    + args.purification_consistency_weight * purification_loss
+                    + args.purification_face_weight * purified_face_loss
+                    + args.selective_visibility_weight * selective_visibility_loss
                     + args.visual_tv_weight * visual_tv_loss
                     + args.delta_l2_weight * delta_l2_loss
                 )
@@ -528,6 +757,11 @@ def main() -> int:
             epoch_metrics["lpips"] += float(lpips_loss.item())
             epoch_metrics["face_identity"] += float(face_identity_loss.item())
             epoch_metrics["face_drift"] += float(face_drift_loss.item())
+            epoch_metrics["real_face_id"] += float(real_face_id_loss.item())
+            epoch_metrics["real_face_id_drift"] += float(real_face_id_drift_loss.item())
+            epoch_metrics["purification"] += float(purification_loss.item())
+            epoch_metrics["purification_face"] += float(purified_face_loss.item())
+            epoch_metrics["selective_visibility"] += float(selective_visibility_loss.item())
             epoch_metrics["visual_tv"] += float(visual_tv_loss.item())
             epoch_metrics["delta_l2"] += float(delta_l2_loss.item())
 
@@ -538,6 +772,7 @@ def main() -> int:
             device=device,
             max_epsilon=args.max_epsilon,
             lpips_model=lpips_model,
+            face_id_model=face_id_model,
             drift_config=drift_config,
             args=args,
         ) if val_loader is not None else {}
@@ -549,7 +784,9 @@ def main() -> int:
             "config": {
                 "imageSize": args.image_size,
                 "samplingMode": args.sampling_mode,
+                "familyBalanceAlpha": args.family_balance_alpha,
                 "maxEpsilon": args.max_epsilon,
+                "faceIdBackend": effective_face_id_backend,
             },
         }
         with history_path.open("a", encoding="utf-8") as handle:
@@ -584,6 +821,7 @@ def main() -> int:
         "trainGroups": len(train_groups),
         "valGroups": len(val_groups),
         "outputDir": str(output_dir),
+        "faceIdBackend": effective_face_id_backend,
         "checkpoints": {
             "best": str(checkpoints_dir / "best.pt"),
             "latest": str(checkpoints_dir / "latest.pt"),

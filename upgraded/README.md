@@ -100,3 +100,41 @@ That means the container can use a mounted local model directory at `/app/models
 - `upgraded` defaults to full-strength, fail-closed immunization for honest evaluation. If a run runs out of GPU memory, it errors instead of silently weakening the defense.
 - Set `PHOTOGUARD_REQUIRE_FULL_STRENGTH=0` if you explicitly want to re-enable the lower-memory fallback path.
 - The root `feedback.py` and `run_feedback_demo.py` remain available as a lightweight standalone demo of the same feedback pattern.
+
+## Training stack
+
+The upgraded workspace now includes an SDXL teacher-export and student-protector training path:
+
+- `scripts/generate_teacher_set.py`: exports protected teacher images and deltas
+- `scripts/train_protector.py`: trains a single-pass protector model from that teacher data
+- `scripts/eval_external_edits.py`: creates external-eval templates and scores DeeVid/NB2 results after you fill in the edited output paths
+- `training-requirements.txt`: optional extra dependencies for training and external evaluation
+
+Install the extra training dependencies into your training environment:
+
+`cd /home/tobi/photoguard/upgraded && pip install -r training-requirements.txt`
+
+Notable training features now included:
+
+- early-step weighted denoiser supervision
+- mask augmentation inside teacher generation
+- grouped prompt-family sampling for prompt-agnostic training
+- portrait face branch with both heuristic face descriptors and optional real FaceNet embeddings
+- purification-aware consistency losses
+- selective perturbation weighting for better visual fidelity
+
+Generate a teacher set:
+
+`cd /home/tobi/photoguard/upgraded && python scripts/generate_teacher_set.py --metadata /path/to/metadata.jsonl --output-dir /path/to/teacher`
+
+Train a student protector:
+
+`cd /home/tobi/photoguard/upgraded && python scripts/train_protector.py --manifest /path/to/teacher/manifest.jsonl --output-dir /path/to/run`
+
+Create an external-eval template from teacher samples:
+
+`cd /home/tobi/photoguard/upgraded && python scripts/eval_external_edits.py --teacher-manifest /path/to/teacher/manifest.jsonl --template-out /path/to/eval_cases.csv`
+
+After manually filling `unprotected_edit` and `protected_edit` paths for DeeVid/NB2 outputs, score the batch:
+
+`cd /home/tobi/photoguard/upgraded && python scripts/eval_external_edits.py --cases-csv /path/to/eval_cases.csv --report-out /path/to/eval_report.csv`

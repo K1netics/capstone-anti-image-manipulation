@@ -1,0 +1,7 @@
+numpy
+torch
+torchvision
+lpips
+facenet-pytorch
+pillow
+tqdm
