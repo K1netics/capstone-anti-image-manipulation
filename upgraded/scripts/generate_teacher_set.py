@@ -376,6 +376,20 @@ def _progress_logger(sample_slug: str):
     return callback
 
 
+def _gpu_error_logger(sample_slug: str):
+    def callback(exc: BaseException) -> None:
+        print(
+            f"[{sample_slug}] retryable GPU runtime error: "
+            f"{exc.__class__.__name__}: {exc}",
+            flush=True,
+        )
+        formatted = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        for line in "".join(formatted).rstrip().splitlines():
+            print(f"[{sample_slug}] {line}", flush=True)
+
+    return callback
+
+
 def _teacher_overrides(args: argparse.Namespace) -> BackendSettingOverrides:
     return BackendSettingOverrides(
         defense_canvas=args.defense_canvas,
@@ -504,6 +518,7 @@ def main() -> int:
                     )
 
                     progress_callback = _progress_logger(sample_slug)
+                    gpu_error_callback = _gpu_error_logger(sample_slug)
                     immunized_working_image = _try_immunize_once(
                         immunization_image,
                         immunization_mask,
@@ -514,6 +529,7 @@ def main() -> int:
                         config=immunization_config,
                         seed=seed,
                         progress_callback=progress_callback,
+                        error_callback=gpu_error_callback,
                     )
                     if immunized_working_image is None and not immunization_config.allow_low_memory_fallback:
                         raise RuntimeError("Full-strength immunization failed before fallback was allowed.")
@@ -529,6 +545,7 @@ def main() -> int:
                             config=fallback_config,
                             seed=seed,
                             progress_callback=progress_callback,
+                            error_callback=gpu_error_callback,
                         )
                     if immunized_working_image is None:
                         raise RuntimeError("Immunization exhausted all fallback attempts.")

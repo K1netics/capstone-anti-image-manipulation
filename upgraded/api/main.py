@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock, Thread
@@ -1493,6 +1494,7 @@ def _try_immunize_once(
     config: ImmunizationConfig,
     seed: int,
     progress_callback,
+    error_callback: Callable[[BaseException], None] | None = None,
 ) -> Image.Image | None:
     try:
         immunized_image, _ = immunize_image(
@@ -1510,6 +1512,8 @@ def _try_immunize_once(
     except Exception as exc:
         if not _is_retryable_gpu_runtime_error(exc):
             raise
+        if error_callback is not None:
+            error_callback(exc)
         _cleanup_runtime_memory()
         return None
 
