@@ -11,8 +11,11 @@ import torch
 import torch.nn.functional as F
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+BACKEND_DIR = ROOT_DIR / "backend"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 from backend.immunization import compute_masked_descriptor, descriptor_similarity  # noqa: E402
 from scripts.train_protector import (  # noqa: E402
