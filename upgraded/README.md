@@ -112,7 +112,15 @@ The upgraded workspace now includes an SDXL teacher-export and student-protector
 
 Install the extra training dependencies into your training environment:
 
+`cd /home/tobi/photoguard/upgraded && pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.8.0 torchvision==0.23.0`
+`cd /home/tobi/photoguard/upgraded && grep -Ev '^(torch|torchvision|xformers)($|[<>=!~])' api/requirements.txt > /tmp/api-reqs-no-torch.txt && pip install -r /tmp/api-reqs-no-torch.txt`
 `cd /home/tobi/photoguard/upgraded && pip install -r training-requirements.txt`
+
+Optional real face-ID branch:
+
+`cd /home/tobi/photoguard/upgraded && pip install --no-deps facenet-pytorch`
+
+Do not run a blind `pip install xformers` in the RunPod training venv. It can replace the working `torch==2.8.0+cu128` stack with incompatible CUDA 13 wheels.
 
 Notable training features now included:
 
