@@ -64,6 +64,11 @@ def _write_template(teacher_manifest: Path, template_out: Path) -> None:
         "unprotected_edit",
         "protected_edit",
         "mask",
+        "manual_prompt_compliance_unprotected",
+        "manual_prompt_compliance_protected",
+        "manual_identity_retention_protected",
+        "manual_collateral_damage_protected",
+        "manual_derailment_protected",
         "notes",
     ]
     template_out.parent.mkdir(parents=True, exist_ok=True)
@@ -84,6 +89,11 @@ def _write_template(teacher_manifest: Path, template_out: Path) -> None:
                     "unprotected_edit": "",
                     "protected_edit": "",
                     "mask": row.get("mask", ""),
+                    "manual_prompt_compliance_unprotected": "",
+                    "manual_prompt_compliance_protected": "",
+                    "manual_identity_retention_protected": "",
+                    "manual_collateral_damage_protected": "",
+                    "manual_derailment_protected": "",
                     "notes": "",
                 }
             )
@@ -92,6 +102,30 @@ def _write_template(teacher_manifest: Path, template_out: Path) -> None:
 def _load_cases_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def _masked_l1(left: torch.Tensor, right: torch.Tensor, spatial_mask: torch.Tensor) -> float:
+    mask = spatial_mask.to(device=left.device, dtype=left.dtype)
+    if mask.shape[1] == 1 and left.shape[1] != 1:
+        mask = mask.repeat(1, left.shape[1], 1, 1)
+    diff = (left - right).abs() * mask
+    denom = mask.mean().clamp_min(1e-6)
+    return float((diff.mean() / denom).item())
+
+
+def _masked_lpips(
+    lpips_model,
+    source: torch.Tensor,
+    compare: torch.Tensor,
+    spatial_mask: torch.Tensor,
+) -> float:
+    if lpips_model is None:
+        return 0.0
+    mask = spatial_mask.to(device=source.device, dtype=source.dtype)
+    if mask.shape[1] == 1 and source.shape[1] != 1:
+        mask = mask.repeat(1, source.shape[1], 1, 1)
+    isolated_compare = source * (1.0 - mask) + compare * mask
+    return float(lpips_model(isolated_compare * 2.0 - 1.0, source * 2.0 - 1.0).mean().item())
 
 
 def _score_cases(
@@ -116,6 +150,7 @@ def _score_cases(
             protected_mask = (1.0 - mask).clamp(0.0, 1.0)
         else:
             protected_mask = torch.ones((1, 1, source.shape[-2], source.shape[-1]), device=device, dtype=source.dtype)
+        context_mask = (1.0 - protected_mask).clamp(0.0, 1.0)
 
         face_mask = _build_face_proxy_map(source, protected_mask)
         source_desc = compute_masked_descriptor(source, protected_mask)
@@ -133,6 +168,20 @@ def _score_cases(
             protected_cost_lpips = 0.0
             unprotected_edit_lpips = 0.0
             protected_edit_lpips = 0.0
+
+        protected_cost_protected_region_l1 = _masked_l1(protected, source, protected_mask)
+        protected_cost_context_l1 = _masked_l1(protected, source, context_mask)
+        unprotected_edit_protected_region_l1 = _masked_l1(unprotected_edit, source, protected_mask)
+        protected_edit_protected_region_l1 = _masked_l1(protected_edit, source, protected_mask)
+        unprotected_edit_context_l1 = _masked_l1(unprotected_edit, source, context_mask)
+        protected_edit_context_l1 = _masked_l1(protected_edit, source, context_mask)
+
+        protected_cost_protected_region_lpips = _masked_lpips(lpips_model, source, protected, protected_mask)
+        protected_cost_context_lpips = _masked_lpips(lpips_model, source, protected, context_mask)
+        unprotected_edit_protected_region_lpips = _masked_lpips(lpips_model, source, unprotected_edit, protected_mask)
+        protected_edit_protected_region_lpips = _masked_lpips(lpips_model, source, protected_edit, protected_mask)
+        unprotected_edit_context_lpips = _masked_lpips(lpips_model, source, unprotected_edit, context_mask)
+        protected_edit_context_lpips = _masked_lpips(lpips_model, source, protected_edit, context_mask)
 
         generic_similarity_unprotected = float(descriptor_similarity(source_desc, unprotected_desc).item())
         generic_similarity_protected = float(descriptor_similarity(source_desc, protected_desc).item())
@@ -170,6 +219,27 @@ def _score_cases(
                 "protected_edit_lpips": protected_edit_lpips,
                 "edit_attenuation_l1": unprotected_edit_l1 - protected_edit_l1,
                 "edit_attenuation_lpips": unprotected_edit_lpips - protected_edit_lpips,
+                "protected_region_fraction": float(protected_mask.mean().item()),
+                "protected_cost_protected_region_l1": protected_cost_protected_region_l1,
+                "protected_cost_context_l1": protected_cost_context_l1,
+                "unprotected_edit_protected_region_l1": unprotected_edit_protected_region_l1,
+                "protected_edit_protected_region_l1": protected_edit_protected_region_l1,
+                "edit_attenuation_protected_region_l1": unprotected_edit_protected_region_l1 - protected_edit_protected_region_l1,
+                "unprotected_edit_context_l1": unprotected_edit_context_l1,
+                "protected_edit_context_l1": protected_edit_context_l1,
+                "context_drift_increase_l1": protected_edit_context_l1 - unprotected_edit_context_l1,
+                "protected_cost_protected_region_lpips": protected_cost_protected_region_lpips,
+                "protected_cost_context_lpips": protected_cost_context_lpips,
+                "unprotected_edit_protected_region_lpips": unprotected_edit_protected_region_lpips,
+                "protected_edit_protected_region_lpips": protected_edit_protected_region_lpips,
+                "edit_attenuation_protected_region_lpips": unprotected_edit_protected_region_lpips - protected_edit_protected_region_lpips,
+                "unprotected_edit_context_lpips": unprotected_edit_context_lpips,
+                "protected_edit_context_lpips": protected_edit_context_lpips,
+                "context_drift_increase_lpips": protected_edit_context_lpips - unprotected_edit_context_lpips,
+                "protected_locality_ratio_l1": protected_edit_context_l1 / max(protected_edit_protected_region_l1, 1e-6),
+                "unprotected_locality_ratio_l1": unprotected_edit_context_l1 / max(unprotected_edit_protected_region_l1, 1e-6),
+                "protected_locality_ratio_lpips": protected_edit_context_lpips / max(protected_edit_protected_region_lpips, 1e-6),
+                "unprotected_locality_ratio_lpips": unprotected_edit_context_lpips / max(unprotected_edit_protected_region_lpips, 1e-6),
                 "generic_similarity_unprotected": generic_similarity_unprotected,
                 "generic_similarity_protected": generic_similarity_protected,
                 "face_similarity_unprotected": face_similarity_unprotected,
