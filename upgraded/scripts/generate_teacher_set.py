@@ -169,6 +169,36 @@ def _parse_args() -> argparse.Namespace:
         help="Portrait-specific face identity confusion strength.",
     )
     parser.add_argument(
+        "--real-face-id",
+        type=float,
+        default=0.08,
+        help="Teacher-time FaceNet confusion strength on the protected face region.",
+    )
+    parser.add_argument(
+        "--real-face-id-drift",
+        type=float,
+        default=0.04,
+        help="Teacher-time FaceNet confusion strength on cleanup/drift proxy views.",
+    )
+    parser.add_argument(
+        "--compression-jitter",
+        type=float,
+        default=0.04,
+        help="Compression/JPEG proxy strength used during teacher optimization.",
+    )
+    parser.add_argument(
+        "--updown-jitter",
+        type=float,
+        default=0.12,
+        help="Down-up scale proxy strength used during teacher optimization.",
+    )
+    parser.add_argument(
+        "--sharpen-proxy",
+        type=float,
+        default=0.1,
+        help="Sharpen/deartifact proxy strength used during teacher optimization.",
+    )
+    parser.add_argument(
         "--mask-variant-count",
         type=int,
         default=0,
@@ -284,14 +314,32 @@ def _build_mask_variants(mask_image: Image.Image, count: int, strength: float) -
     radius = max(1, int(round(max_dim * min(0.03, 0.004 + 0.014 * float(strength)))))
     kernel_size = radius * 2 + 1
     shift = max(1, int(round(max_dim * min(0.015, 0.002 + 0.008 * float(strength)))))
+    strong_radius = max(radius + 1, int(round(radius * (1.45 + 0.25 * float(strength)))))
+    diag_shift = max(1, int(round(shift * 1.25)))
     candidates = [
         ("dilate", base_mask.filter(ImageFilter.MaxFilter(kernel_size))),
+        ("dilate_wide", base_mask.filter(ImageFilter.MaxFilter(strong_radius * 2 + 1))),
         ("erode", base_mask.filter(ImageFilter.MinFilter(kernel_size))),
+        ("erode_wide", base_mask.filter(ImageFilter.MinFilter(strong_radius * 2 + 1))),
         ("shift_right", _shift_mask(base_mask, shift, 0)),
         ("shift_left", _shift_mask(base_mask, -shift, 0)),
         ("shift_down", _shift_mask(base_mask, 0, shift)),
         ("shift_up", _shift_mask(base_mask, 0, -shift)),
+        ("shift_down_right", _shift_mask(base_mask, diag_shift, diag_shift)),
+        ("shift_down_left", _shift_mask(base_mask, -diag_shift, diag_shift)),
+        ("shift_up_right", _shift_mask(base_mask, diag_shift, -diag_shift)),
+        ("shift_up_left", _shift_mask(base_mask, -diag_shift, -diag_shift)),
     ]
+    if float(strength) >= 0.1:
+        dilated = base_mask.filter(ImageFilter.MaxFilter(kernel_size))
+        candidates.extend(
+            [
+                ("dilate_shift_right", _shift_mask(dilated, shift, 0)),
+                ("dilate_shift_left", _shift_mask(dilated, -shift, 0)),
+                ("dilate_shift_down", _shift_mask(dilated, 0, shift)),
+                ("dilate_shift_up", _shift_mask(dilated, 0, -shift)),
+            ]
+        )
 
     seen = {hashlib.md5(base_mask.tobytes()).hexdigest()}
     for name, variant in candidates:
@@ -359,7 +407,18 @@ def _progress_logger(sample_slug: str):
         metric_suffix = ""
         if isinstance(metrics, dict) and metrics:
             interesting = []
-            for key in ("target", "denoiser", "reference", "identity", "semantic", "watermark"):
+            for key in (
+                "target",
+                "denoiser",
+                "reference",
+                "identity",
+                "semantic",
+                "watermark",
+                "sd_face",
+                "sd_cleanup",
+                "sd_real_face",
+                "sd_real_face_drift",
+            ):
                 if isinstance(metrics.get(key), (int, float)):
                     interesting.append(f"{key}={float(metrics[key]):.3f}")
             if interesting:
@@ -400,8 +459,13 @@ def _teacher_overrides(args: argparse.Namespace) -> BackendSettingOverrides:
         denoiser_strength=args.denoiser_strength,
         reference_confusion_strength=args.reference_confusion,
         identity_drift_strength=args.identity_drift,
+        real_face_id_strength=args.real_face_id,
+        real_face_id_drift_strength=args.real_face_id_drift,
         semantic_boundary_strength=args.semantic_boundary,
         watermark_strength=args.watermark,
+        compression_jitter_strength=args.compression_jitter,
+        updown_scale_jitter=args.updown_jitter,
+        sharpen_proxy_strength=args.sharpen_proxy,
         tripwire_global_strength=args.global_anchor,
     )
 
@@ -506,6 +570,15 @@ def main() -> int:
                         denoiser_early_timestep_bias=float(
                             row.get("early_step_bias", args.early_step_bias)
                         ),
+                        compression_jitter_strength=float(
+                            row.get("compression_jitter", args.compression_jitter)
+                        ),
+                        updown_scale_jitter=float(
+                            row.get("updown_jitter", args.updown_jitter)
+                        ),
+                        sharpen_proxy_strength=float(
+                            row.get("sharpen_proxy", args.sharpen_proxy)
+                        ),
                         mask_augmentation_strength=float(
                             row.get("mask_augment_strength", args.mask_augment_strength)
                         ),
@@ -514,6 +587,12 @@ def main() -> int:
                         ),
                         portrait_face_identity_strength=float(
                             row.get("portrait_face_identity", args.portrait_face_identity)
+                        ),
+                        real_face_id_strength=float(
+                            row.get("real_face_id", args.real_face_id)
+                        ),
+                        real_face_id_drift_strength=float(
+                            row.get("real_face_id_drift", args.real_face_id_drift)
                         ),
                     )
 

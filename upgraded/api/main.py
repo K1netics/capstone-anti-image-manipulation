@@ -121,13 +121,13 @@ DEFAULT_IMMUNIZATION_CONFIG = ImmunizationConfig(
     chaos_strength=0.28,
     denoiser_strength=0.16,
     denoiser_steps=2,
-    denoiser_early_timestep_bias=1.4,
+    denoiser_early_timestep_bias=1.8,
     eot_samples=2,
     resize_jitter=0.08,
     noise_strength=0.015,
     blur_kernel_size=3,
     mask_augmentation_strength=0.16,
-    mask_augmentation_count=1,
+    mask_augmentation_count=2,
     semantic_boundary_strength=0.08,
     semantic_ring_width=8,
     region_priority_strength=0.05,
@@ -136,12 +136,16 @@ DEFAULT_IMMUNIZATION_CONFIG = ImmunizationConfig(
     priority_text_strength=0.16,
     priority_logo_strength=0.16,
     watermark_strength=0.035,
-    reference_confusion_strength=0.06,
-    identity_drift_strength=0.05,
-    portrait_face_identity_strength=0.05,
-    compression_jitter_strength=0.03,
+    reference_confusion_strength=0.08,
+    identity_drift_strength=0.08,
+    portrait_face_identity_strength=0.08,
+    real_face_id_strength=0.08,
+    real_face_id_drift_strength=0.04,
+    compression_jitter_strength=0.04,
     subpixel_jitter=0.2,
     frequency_noise_strength=0.0025,
+    updown_scale_jitter=0.12,
+    sharpen_proxy_strength=0.1,
     tripwire_global_strength=0.04,
     tripwire_global_count=2,
     max_prompt_variants=6,
@@ -221,7 +225,10 @@ METRIC_LABELS = {
     "sd_drift": "SD identity drift",
     "sd_face": "SD face identity confusion",
     "sd_face_drift": "SD face drift",
+    "sd_cleanup": "SD cleanup confusion",
     "sd_global": "SD context anchors",
+    "sd_real_face": "SD real face-ID confusion",
+    "sd_real_face_drift": "SD real face-ID drift",
     "semantic": "Semantic boundary",
     "stepSize": "Step size",
     "target": "Target latent",
@@ -293,8 +300,13 @@ class BackendSettingOverrides:
     denoiser_strength: float | None = None
     reference_confusion_strength: float | None = None
     identity_drift_strength: float | None = None
+    real_face_id_strength: float | None = None
+    real_face_id_drift_strength: float | None = None
     semantic_boundary_strength: float | None = None
     watermark_strength: float | None = None
+    compression_jitter_strength: float | None = None
+    updown_scale_jitter: float | None = None
+    sharpen_proxy_strength: float | None = None
     tripwire_global_strength: float | None = None
 
 
@@ -1174,8 +1186,44 @@ def _immunization_config_for_profile(profile_name: str, target_size: tuple[int, 
             frequency_band_low=0.1,
             frequency_band_high=0.22,
             watermark_strength=0.03,
+            style_cloak_strength=0.08,
+            style_cloak_scales=(1.0, 0.5, 0.25),
+            ownership_watermark_strength=0.04,
+            ownership_watermark_views=3,
             edge_tracking_strength=0.05,
             max_prompt_variants=3,
+        )
+    if profile_name == "artist_cloak":
+        return replace(
+            config,
+            target_mode="shifted_input",
+            iters=14,
+            target_strength=0.46,
+            chaos_strength=0.16,
+            denoiser_strength=0.08,
+            denoiser_steps=1,
+            denoiser_early_timestep_bias=0.5,
+            eot_samples=2,
+            resize_jitter=0.05,
+            noise_strength=0.0035,
+            mask_augmentation_strength=0.08,
+            mask_augmentation_count=1,
+            compression_jitter_strength=0.045,
+            subpixel_jitter=0.18,
+            frequency_noise_strength=0.003,
+            frequency_band_low=0.08,
+            frequency_band_high=0.24,
+            watermark_strength=0.04,
+            style_cloak_strength=0.14,
+            style_cloak_scales=(1.0, 0.5, 0.25),
+            ownership_watermark_strength=0.08,
+            ownership_watermark_views=4,
+            region_priority_strength=0.05,
+            priority_face_strength=0.15,
+            priority_skin_strength=0.1,
+            edge_tracking_strength=0.05,
+            semantic_boundary_strength=0.03,
+            max_prompt_variants=4,
         )
     if profile_name == "text_aware_scaffold":
         return replace(
@@ -1220,6 +1268,8 @@ def _immunization_config_for_profile(profile_name: str, target_size: tuple[int, 
             frequency_band_low=0.1,
             frequency_band_high=0.3,
             watermark_strength=0.06,
+            ownership_watermark_strength=0.04,
+            ownership_watermark_views=3,
             region_priority_strength=0.06,
             priority_face_strength=0.2,
             priority_skin_strength=0.15,
@@ -1421,6 +1471,8 @@ def _low_memory_immunization_config(config: ImmunizationConfig) -> ImmunizationC
         reference_confusion_strength=min(config.reference_confusion_strength, 0.06) * scale,
         identity_drift_strength=min(config.identity_drift_strength, 0.05) * scale,
         portrait_face_identity_strength=min(config.portrait_face_identity_strength, 0.05) * scale,
+        real_face_id_strength=min(config.real_face_id_strength, 0.05) * scale,
+        real_face_id_drift_strength=min(config.real_face_id_drift_strength, 0.03) * scale,
         context_blend_strength=min(config.context_blend_strength, 0.03) * scale,
         reference_region_count=min(config.reference_region_count, 2),
         tripwire_strength=0.0 if config.profile_name in {"nano_banana_2_hard_block", "nano_banana_2_distortion"} else min(config.tripwire_strength, 0.12),
@@ -1458,10 +1510,20 @@ def _apply_backend_setting_overrides(
         updates["reference_confusion_strength"] = overrides.reference_confusion_strength
     if overrides.identity_drift_strength is not None:
         updates["identity_drift_strength"] = overrides.identity_drift_strength
+    if overrides.real_face_id_strength is not None:
+        updates["real_face_id_strength"] = overrides.real_face_id_strength
+    if overrides.real_face_id_drift_strength is not None:
+        updates["real_face_id_drift_strength"] = overrides.real_face_id_drift_strength
     if overrides.semantic_boundary_strength is not None:
         updates["semantic_boundary_strength"] = overrides.semantic_boundary_strength
     if overrides.watermark_strength is not None:
         updates["watermark_strength"] = overrides.watermark_strength
+    if overrides.compression_jitter_strength is not None:
+        updates["compression_jitter_strength"] = overrides.compression_jitter_strength
+    if overrides.updown_scale_jitter is not None:
+        updates["updown_scale_jitter"] = overrides.updown_scale_jitter
+    if overrides.sharpen_proxy_strength is not None:
+        updates["sharpen_proxy_strength"] = overrides.sharpen_proxy_strength
     if overrides.tripwire_global_strength is not None:
         updates["tripwire_global_strength"] = overrides.tripwire_global_strength
     return replace(config, **updates)

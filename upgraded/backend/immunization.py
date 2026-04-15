@@ -13,8 +13,14 @@ from torchvision.transforms import ToPILImage
 
 from utils import preprocess, prepare_mask_and_masked_image, recover_image, resize_and_crop
 
+try:  # pragma: no cover - optional dependency in some local envs
+    from facenet_pytorch import InceptionResnetV1  # type: ignore
+except ImportError:  # pragma: no cover
+    InceptionResnetV1 = None
+
 topil = ToPILImage()
 ProgressCallback = Callable[[dict[str, object]], None]
+_FACENET_MODEL_CACHE: dict[str, object | None] = {}
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,11 @@ class ImmunizationConfig:
     frequency_band_low: float = 0.08
     frequency_band_high: float = 0.28
     watermark_strength: float = 0.0
+    style_cloak_strength: float = 0.0
+    style_cloak_scales: tuple = (1.0, 0.5, 0.25)
+    ownership_watermark_strength: float = 0.0
+    ownership_watermark_views: int = 0
+    ownership_watermark_bands: tuple = ((0.06, 0.18), (0.14, 0.32))
     region_priority_strength: float = 0.0
     priority_face_strength: float = 0.0
     priority_skin_strength: float = 0.0
@@ -57,6 +68,8 @@ class ImmunizationConfig:
     reference_confusion_strength: float = 0.0
     identity_drift_strength: float = 0.0
     portrait_face_identity_strength: float = 0.0
+    real_face_id_strength: float = 0.0
+    real_face_id_drift_strength: float = 0.0
     context_blend_strength: float = 0.0
     reference_region_count: int = 1
     tripwire_strength: float = 0.0
@@ -164,15 +177,44 @@ def build_mask_augmentation_variants(mask_tensor, config):
     max_dim = max(height, width)
     radius = max(1, int(round(max_dim * min(0.03, 0.004 + 0.014 * strength))))
     shift = max(1, int(round(max_dim * min(0.015, 0.002 + 0.008 * strength))))
+    strong_radius = max(radius + 1, int(round(radius * (1.45 + 0.25 * strength))))
+    diag_shift = max(1, int(round(shift * 1.25)))
 
     candidates = [
         ("dilate", dilate_binary_mask(mask_tensor, radius)),
+        ("dilate_wide", dilate_binary_mask(mask_tensor, strong_radius)),
         ("erode", erode_binary_mask(mask_tensor, radius)),
+        ("erode_wide", erode_binary_mask(mask_tensor, strong_radius)),
         ("shift_right", translate_binary_mask(mask_tensor, shift, 0)),
         ("shift_left", translate_binary_mask(mask_tensor, -shift, 0)),
         ("shift_down", translate_binary_mask(mask_tensor, 0, shift)),
         ("shift_up", translate_binary_mask(mask_tensor, 0, -shift)),
+        ("shift_down_right", translate_binary_mask(mask_tensor, diag_shift, diag_shift)),
+        ("shift_down_left", translate_binary_mask(mask_tensor, -diag_shift, diag_shift)),
+        ("shift_up_right", translate_binary_mask(mask_tensor, diag_shift, -diag_shift)),
+        ("shift_up_left", translate_binary_mask(mask_tensor, -diag_shift, -diag_shift)),
     ]
+    if strength >= 0.1:
+        candidates.extend(
+            [
+                (
+                    "dilate_shift_right",
+                    translate_binary_mask(dilate_binary_mask(mask_tensor, radius), shift, 0),
+                ),
+                (
+                    "dilate_shift_left",
+                    translate_binary_mask(dilate_binary_mask(mask_tensor, radius), -shift, 0),
+                ),
+                (
+                    "dilate_shift_down",
+                    translate_binary_mask(dilate_binary_mask(mask_tensor, radius), 0, shift),
+                ),
+                (
+                    "dilate_shift_up",
+                    translate_binary_mask(dilate_binary_mask(mask_tensor, radius), 0, -shift),
+                ),
+            ]
+        )
 
     seen = {mask_tensor.detach().to(dtype=torch.uint8).cpu().numpy().tobytes()}
     for name, variant in candidates:
@@ -350,7 +392,11 @@ class _PGDBaseProfile:
                 do_classifier_free_guidance,
             )
 
-        denoiser_timesteps = select_proxy_timesteps(scheduler.timesteps, config.denoiser_steps)
+        denoiser_timesteps = select_proxy_timesteps(
+            scheduler.timesteps,
+            config.denoiser_steps,
+            getattr(config, "denoiser_early_timestep_bias", 0.0),
+        )
         denoiser_timestep_weights = build_denoiser_timestep_weights(
             denoiser_timesteps,
             getattr(config, "denoiser_early_timestep_bias", 0.0),
@@ -524,6 +570,8 @@ class LayeredDefenseImmunizationProfile(_PGDBaseProfile):
             or config.priority_text_strength > 0
             or config.priority_logo_strength > 0
             or config.portrait_face_identity_strength > 0
+            or config.real_face_id_strength > 0
+            or config.real_face_id_drift_strength > 0
         ):
             reference_data.update(
                 build_region_priority_maps(
@@ -552,6 +600,32 @@ class LayeredDefenseImmunizationProfile(_PGDBaseProfile):
                 config.frequency_band_high,
                 device,
             ).detach()
+
+        priority_map = reference_data.get("region_priority_map")
+        if config.style_cloak_strength > 0:
+            style_mask = protected_mask.to(device=device, dtype=torch.float32)
+            if boundary_ring is not None and float(boundary_ring.mean().item()) > 1e-5:
+                style_mask = normalize_map(
+                    style_mask + 0.35 * boundary_ring.to(device=device, dtype=torch.float32)
+                )
+            reference_data["style_cloak_mask"] = style_mask.detach()
+            original_tensor = preprocess(init_image).to(device=device, dtype=torch.float32)
+            reference_data["style_descriptor"] = compute_style_descriptor(
+                original_tensor,
+                style_mask,
+                scales=config.style_cloak_scales or (1.0, 0.5, 0.25),
+            ).detach()
+
+        if config.ownership_watermark_strength > 0:
+            ownership_mask = priority_map if priority_map is not None else protected_mask
+            reference_data["ownership_watermark_mask"] = ownership_mask.detach()
+            reference_data["ownership_watermark_refs"] = build_ownership_watermark_references(
+                protected_mask.shape[-2],
+                protected_mask.shape[-1],
+                seed,
+                config.ownership_watermark_bands,
+                device,
+            )
 
         return reference_data
 
@@ -592,6 +666,33 @@ class LayeredDefenseImmunizationProfile(_PGDBaseProfile):
             )
             extra_loss = extra_loss + config.watermark_strength * watermark_alignment
             metrics["watermark"] = watermark_alignment.detach()
+
+        style_descriptor = reference_data.get("style_descriptor")
+        style_mask = reference_data.get("style_cloak_mask")
+        if config.style_cloak_strength > 0 and style_descriptor is not None and style_mask is not None:
+            style_current = compute_style_descriptor(
+                transformed.to(dtype=torch.float32),
+                style_mask,
+                scales=config.style_cloak_scales or (1.0, 0.5, 0.25),
+            )
+            style_cloak = descriptor_distance(
+                style_current,
+                style_descriptor.to(device=style_current.device, dtype=style_current.dtype),
+            )
+            extra_loss = extra_loss + config.style_cloak_strength * style_cloak
+            metrics["style_cloak"] = style_cloak.detach()
+
+        ownership_refs = reference_data.get("ownership_watermark_refs") or []
+        ownership_mask = reference_data.get("ownership_watermark_mask")
+        if config.ownership_watermark_strength > 0 and ownership_refs and ownership_mask is not None:
+            ownership_alignment = compute_ownership_watermark_alignment(
+                transformed,
+                ownership_refs,
+                ownership_mask,
+                config,
+            )
+            extra_loss = extra_loss + config.ownership_watermark_strength * ownership_alignment
+            metrics["ownership"] = ownership_alignment.detach()
 
         return extra_loss, metrics
 
@@ -676,7 +777,12 @@ class StableDiffusionImmunizationProfile(LayeredDefenseImmunizationProfile):
 
         original_image_tensor = None
         if (
-            (config.reference_confusion_strength > 0 or config.portrait_face_identity_strength > 0)
+            (
+                config.reference_confusion_strength > 0
+                or config.portrait_face_identity_strength > 0
+                or config.real_face_id_strength > 0
+                or config.real_face_id_drift_strength > 0
+            )
             and protected_mask is not None
         ):
             original_image_tensor = preprocess(init_image).to(device=device, dtype=torch.float32)
@@ -693,7 +799,11 @@ class StableDiffusionImmunizationProfile(LayeredDefenseImmunizationProfile):
                     boundary_ring.to(device=device, dtype=torch.float32),
                 ).detach()
 
-        if config.portrait_face_identity_strength > 0:
+        if (
+            config.portrait_face_identity_strength > 0
+            or config.real_face_id_strength > 0
+            or config.real_face_id_drift_strength > 0
+        ):
             face_proxy_map = reference_data.get("face_proxy_map")
             if (
                 face_proxy_map is not None
@@ -706,10 +816,22 @@ class StableDiffusionImmunizationProfile(LayeredDefenseImmunizationProfile):
                 )
                 if float(face_mask.mean().item()) > 1e-5:
                     reference_data["sd_face_proxy_mask"] = face_mask.detach()
-                    reference_data["sd_face_descriptor"] = compute_masked_descriptor(
-                        original_image_tensor,
-                        face_mask,
-                    ).detach()
+                    if config.portrait_face_identity_strength > 0:
+                        reference_data["sd_face_descriptor"] = compute_masked_descriptor(
+                            original_image_tensor,
+                            face_mask,
+                        ).detach()
+                    if config.real_face_id_strength > 0 or config.real_face_id_drift_strength > 0:
+                        face_id_model = _maybe_build_real_face_id_model(device)
+                        if face_id_model is not None:
+                            reference_embeddings, reference_valid = _compute_real_face_id_reference(
+                                face_id_model,
+                                original_image_tensor,
+                                face_mask,
+                            )
+                            if reference_embeddings is not None and reference_valid is not None:
+                                reference_data["sd_real_face_reference"] = reference_embeddings
+                                reference_data["sd_real_face_valid"] = reference_valid
 
         return reference_data
 
@@ -717,10 +839,24 @@ class StableDiffusionImmunizationProfile(LayeredDefenseImmunizationProfile):
         extra_loss, metrics = super().compute_extra_loss(
             transformed, reference_data, config, pipeline, dtype,
         )
+        image_f32 = transformed.to(dtype=torch.float32)
+        drift_view = None
+        cleanup_views = []
+        if (
+            config.reference_confusion_strength > 0
+            or config.portrait_face_identity_strength > 0
+            or config.real_face_id_drift_strength > 0
+        ):
+            cleanup_views = build_cleanup_proxy_views(image_f32, config)
+        if (
+            config.identity_drift_strength > 0
+            or config.portrait_face_identity_strength > 0
+            or config.real_face_id_drift_strength > 0
+        ):
+            drift_view = build_identity_drift_view(image_f32, config)
 
         # Light descriptor confusion on protected region + boundary.
         if config.reference_confusion_strength > 0:
-            image_f32 = transformed.to(dtype=torch.float32)
             protected_mask = reference_data.get("protected_mask")
             ref_desc = reference_data.get("sd_protected_descriptor")
             if protected_mask is not None and ref_desc is not None:
@@ -728,6 +864,17 @@ class StableDiffusionImmunizationProfile(LayeredDefenseImmunizationProfile):
                 confusion = descriptor_distance(cur_desc, ref_desc)
                 extra_loss = extra_loss + config.reference_confusion_strength * confusion
                 metrics["sd_confusion"] = confusion.detach()
+                if cleanup_views:
+                    cleanup_confusions = [
+                        descriptor_distance(
+                            compute_masked_descriptor(cleanup_view, protected_mask),
+                            ref_desc,
+                        )
+                        for _, cleanup_view in cleanup_views
+                    ]
+                    cleanup_confusion = torch.stack(cleanup_confusions).mean()
+                    extra_loss = extra_loss + 0.45 * config.reference_confusion_strength * cleanup_confusion
+                    metrics["sd_cleanup"] = cleanup_confusion.detach()
 
             boundary_ring = reference_data.get("boundary_ring")
             bnd_desc = reference_data.get("sd_boundary_descriptor")
@@ -740,18 +887,15 @@ class StableDiffusionImmunizationProfile(LayeredDefenseImmunizationProfile):
 
         # Light identity drift under subpixel/compression transforms.
         if config.identity_drift_strength > 0:
-            image_f32 = transformed.to(dtype=torch.float32)
             protected_mask = reference_data.get("protected_mask")
             ref_desc = reference_data.get("sd_protected_descriptor")
-            if protected_mask is not None and ref_desc is not None:
-                drift_view = build_identity_drift_view(image_f32, config)
+            if protected_mask is not None and ref_desc is not None and drift_view is not None:
                 drift_desc = compute_masked_descriptor(drift_view, protected_mask)
                 drift_loss = descriptor_distance(drift_desc, ref_desc)
                 extra_loss = extra_loss + config.identity_drift_strength * drift_loss
                 metrics["sd_drift"] = drift_loss.detach()
 
         if config.portrait_face_identity_strength > 0:
-            image_f32 = transformed.to(dtype=torch.float32)
             face_mask = reference_data.get("sd_face_proxy_mask")
             face_ref = reference_data.get("sd_face_descriptor")
             if face_mask is not None and face_ref is not None:
@@ -760,11 +904,39 @@ class StableDiffusionImmunizationProfile(LayeredDefenseImmunizationProfile):
                 extra_loss = extra_loss + config.portrait_face_identity_strength * face_confusion
                 metrics["sd_face"] = face_confusion.detach()
 
-                face_drift_view = build_identity_drift_view(image_f32, config)
-                face_drift_desc = compute_masked_descriptor(face_drift_view, face_mask)
-                face_drift = descriptor_distance(face_drift_desc, face_ref)
-                extra_loss = extra_loss + 0.5 * config.portrait_face_identity_strength * face_drift
-                metrics["sd_face_drift"] = face_drift.detach()
+                if drift_view is not None:
+                    face_drift_desc = compute_masked_descriptor(drift_view, face_mask)
+                    face_drift = descriptor_distance(face_drift_desc, face_ref)
+                    extra_loss = extra_loss + 0.5 * config.portrait_face_identity_strength * face_drift
+                    metrics["sd_face_drift"] = face_drift.detach()
+
+        if config.real_face_id_strength > 0 or config.real_face_id_drift_strength > 0:
+            face_mask = reference_data.get("sd_face_proxy_mask")
+            real_face_ref = reference_data.get("sd_real_face_reference")
+            real_face_valid = reference_data.get("sd_real_face_valid")
+            if face_mask is not None and real_face_ref is not None and real_face_valid is not None:
+                face_id_model = _maybe_build_real_face_id_model(image_f32.device)
+                if face_id_model is not None:
+                    if config.real_face_id_strength > 0:
+                        real_face_confusion = _compute_real_face_id_confusion(
+                            face_id_model,
+                            image_f32,
+                            face_mask,
+                            real_face_ref,
+                            real_face_valid,
+                        )
+                        extra_loss = extra_loss + config.real_face_id_strength * real_face_confusion
+                        metrics["sd_real_face"] = real_face_confusion.detach()
+                    if config.real_face_id_drift_strength > 0 and drift_view is not None:
+                        real_face_drift = _compute_real_face_id_confusion(
+                            face_id_model,
+                            drift_view,
+                            face_mask,
+                            real_face_ref,
+                            real_face_valid,
+                        )
+                        extra_loss = extra_loss + config.real_face_id_drift_strength * real_face_drift
+                        metrics["sd_real_face_drift"] = real_face_drift.detach()
 
         # Mild global background anchor against full-image redraw / outpainting.
         global_mask = reference_data.get("sd_global_anchor_mask")
@@ -856,6 +1028,17 @@ class StyleTransferScaffoldImmunizationProfile(LayeredDefenseImmunizationProfile
             extra_loss = extra_loss + config.edge_tracking_strength * edge_change
             metrics["edges"] = edge_change.detach()
         return extra_loss, metrics
+
+
+class ArtistCloakImmunizationProfile(StyleTransferScaffoldImmunizationProfile):
+    name = "artist_cloak"
+    default_prompt = "Imitate the style, palette, and texture of the protected artwork."
+    prompt_suffixes = (
+        "{prompt} Learn the palette, brush texture, and stroke rhythm from the image and recreate a matching artwork.",
+        "{prompt} Use the image as a style reference and reproduce the same artistic identity on new content.",
+        "{prompt} Fine-tune on the artwork and generate a new piece with the same rendering style and surface texture.",
+        "{prompt} Preserve composition but mimic the exact color language, texture, and visual fingerprint of the original artwork.",
+    )
 
 
 class TextAwareScaffoldImmunizationProfile(LayeredDefenseImmunizationProfile):
@@ -1385,6 +1568,7 @@ IMMUNIZATION_PROFILES = {
     InstructionEditingScaffoldImmunizationProfile.name: InstructionEditingScaffoldImmunizationProfile(),
     ControlNetScaffoldImmunizationProfile.name: ControlNetScaffoldImmunizationProfile(),
     StyleTransferScaffoldImmunizationProfile.name: StyleTransferScaffoldImmunizationProfile(),
+    ArtistCloakImmunizationProfile.name: ArtistCloakImmunizationProfile(),
     TextAwareScaffoldImmunizationProfile.name: TextAwareScaffoldImmunizationProfile(),
     AdversarialHardenedScaffoldImmunizationProfile.name: AdversarialHardenedScaffoldImmunizationProfile(),
     NanoBananaExperimentalImmunizationProfile.name: NanoBananaExperimentalImmunizationProfile(),
@@ -1761,6 +1945,78 @@ def compute_multiscale_descriptor(image_tensor, spatial_mask, scales=(1.0, 0.5))
     return torch.cat(parts, dim=1)
 
 
+def _masked_stat_features(tensor, mask):
+    rgb_mask = mask.repeat(1, tensor.shape[1], 1, 1)
+    denom = mask.sum(dim=(-2, -1), keepdim=True).clamp_min(1e-4)
+
+    mean = (tensor * rgb_mask).sum(dim=(-2, -1), keepdim=True) / denom
+    variance = ((tensor - mean) * rgb_mask).square().sum(dim=(-2, -1), keepdim=True) / denom
+    std = torch.sqrt(variance + 1e-6)
+    return mean.flatten(start_dim=1), std.flatten(start_dim=1)
+
+
+def compute_style_descriptor(image_tensor, spatial_mask, scales=(1.0, 0.5, 0.25)):
+    """Masked multi-scale style fingerprint for Glaze/Mist-like cloaking."""
+    parts = []
+    base = image_tensor.to(dtype=torch.float32)
+    for scale in scales:
+        if abs(scale - 1.0) < 1e-4:
+            img = base
+            mask = spatial_mask.to(device=base.device, dtype=torch.float32)
+        else:
+            h, w = base.shape[-2:]
+            nh, nw = max(32, int(h * scale)), max(32, int(w * scale))
+            img = F.interpolate(base, size=(nh, nw), mode="bilinear", align_corners=False)
+            mask = F.interpolate(
+                spatial_mask.to(device=base.device, dtype=torch.float32),
+                size=(nh, nw),
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        if mask.shape[1] != 1:
+            mask = mask.mean(dim=1, keepdim=True)
+        mask = mask.clamp(0.0, 1.0)
+
+        luma = rgb_to_luma(img)
+        saturation = (img.amax(dim=1, keepdim=True) - img.amin(dim=1, keepdim=True)).clamp(0.0, 1.0)
+        edges = sobel_magnitude(luma)
+        high_frequency = (img - F.avg_pool2d(img, kernel_size=5, stride=1, padding=2)).abs().mean(dim=1, keepdim=True)
+
+        rgb_mean, rgb_std = _masked_stat_features(img, mask)
+        luma_mean, luma_std = _masked_stat_features(luma, mask)
+        sat_mean, sat_std = _masked_stat_features(saturation, mask)
+        edge_mean, edge_std = _masked_stat_features(edges, mask)
+        hf_mean, hf_std = _masked_stat_features(high_frequency, mask)
+
+        pooled_color = F.adaptive_avg_pool2d(img * mask.repeat(1, img.shape[1], 1, 1), output_size=(2, 2)).flatten(start_dim=1)
+        pooled_texture = F.adaptive_avg_pool2d(
+            torch.cat([luma, edges, high_frequency], dim=1) * mask.repeat(1, 3, 1, 1),
+            output_size=(2, 2),
+        ).flatten(start_dim=1)
+
+        parts.append(
+            torch.cat(
+                [
+                    rgb_mean,
+                    rgb_std,
+                    luma_mean,
+                    luma_std,
+                    sat_mean,
+                    sat_std,
+                    edge_mean,
+                    edge_std,
+                    hf_mean,
+                    hf_std,
+                    pooled_color,
+                    pooled_texture,
+                ],
+                dim=1,
+            )
+        )
+    return F.normalize(torch.cat(parts, dim=1), dim=1)
+
+
 def descriptor_distance(left, right):
     return (left - right).abs().mean()
 
@@ -1776,6 +2032,14 @@ def build_identity_drift_view(image_tensor, config):
     drift_view = apply_light_compression_proxy(
         drift_view, max(0.01, float(config.compression_jitter_strength) * 0.6),
     )
+    if config.updown_scale_jitter > 0:
+        scale = max(0.55, min(0.9, 1.0 - float(config.updown_scale_jitter) * 0.85))
+        drift_view = apply_updown_scale_proxy(drift_view, scale=scale)
+    if config.sharpen_proxy_strength > 0:
+        drift_view = apply_sharpen_proxy(
+            drift_view,
+            strength=max(0.08, float(config.sharpen_proxy_strength) * 0.75),
+        )
     if config.frequency_noise_strength > 0:
         h, w = image_tensor.shape[-2:]
         band_mask = build_frequency_band_mask(h, w, config.frequency_band_low, config.frequency_band_high, image_tensor.device)
@@ -1784,6 +2048,192 @@ def build_identity_drift_view(image_tensor, config):
         ).to(device=image_tensor.device, dtype=image_tensor.dtype)
         drift_view = drift_view + band_noise.repeat(1, image_tensor.shape[1], 1, 1)
     return drift_view.clamp(min=config.clamp_min, max=config.clamp_max)
+
+
+def build_cleanup_proxy_views(image_tensor, config):
+    views = []
+    image_f32 = image_tensor.to(dtype=torch.float32)
+    compression_strength = float(getattr(config, "compression_jitter_strength", 0.0))
+    scale_jitter = float(getattr(config, "updown_scale_jitter", 0.0))
+    sharpen_strength = float(getattr(config, "sharpen_proxy_strength", 0.0))
+
+    if compression_strength > 0:
+        views.append(
+            (
+                "cleanup_compression",
+                apply_light_compression_proxy(
+                    image_f32,
+                    max(0.02, compression_strength),
+                ).clamp(min=config.clamp_min, max=config.clamp_max),
+            )
+        )
+    if scale_jitter > 0:
+        scale = max(0.55, min(0.92, 1.0 - scale_jitter))
+        views.append(
+            (
+                "cleanup_scale",
+                apply_updown_scale_proxy(image_f32, scale=scale).clamp(
+                    min=config.clamp_min,
+                    max=config.clamp_max,
+                ),
+            )
+        )
+    if sharpen_strength > 0:
+        views.append(
+            (
+                "cleanup_sharpen",
+                apply_sharpen_proxy(
+                    image_f32,
+                    strength=max(0.08, sharpen_strength),
+                ).clamp(min=config.clamp_min, max=config.clamp_max),
+            )
+        )
+    if len(views) >= 2:
+        combo = image_f32
+        if getattr(config, "subpixel_jitter", 0.0) > 0:
+            combo = apply_subpixel_translation(combo, max(0.12, float(config.subpixel_jitter) * 0.6))
+        if compression_strength > 0:
+            combo = apply_light_compression_proxy(combo, max(0.02, compression_strength * 0.85))
+        if scale_jitter > 0:
+            combo = apply_updown_scale_proxy(
+                combo,
+                scale=max(0.55, min(0.92, 1.0 - scale_jitter * 0.9)),
+            )
+        if sharpen_strength > 0:
+            combo = apply_sharpen_proxy(combo, strength=max(0.08, sharpen_strength * 0.85))
+        views.append(("cleanup_combo", combo.clamp(min=config.clamp_min, max=config.clamp_max)))
+    return views
+
+
+def _maybe_build_real_face_id_model(device):
+    cache_key = str(device)
+    if cache_key in _FACENET_MODEL_CACHE:
+        return _FACENET_MODEL_CACHE[cache_key]
+    if InceptionResnetV1 is None:
+        _FACENET_MODEL_CACHE[cache_key] = None
+        return None
+    try:
+        model = InceptionResnetV1(pretrained="vggface2").eval().to(device=device)
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+    except Exception:  # pragma: no cover - optional runtime path
+        model = None
+    _FACENET_MODEL_CACHE[cache_key] = model
+    return model
+
+
+def _extract_face_crops(image_tensor, face_mask, crop_size=128):
+    crops = []
+    valid_flags = []
+    batch_size, _, height, width = image_tensor.shape
+    for batch_index in range(batch_size):
+        mask = face_mask[batch_index : batch_index + 1]
+        binary = mask[0, 0] > 0.15
+        if not torch.any(binary):
+            crops.append(torch.zeros((3, crop_size, crop_size), device=image_tensor.device, dtype=image_tensor.dtype))
+            valid_flags.append(torch.zeros((), device=image_tensor.device, dtype=torch.float32))
+            continue
+        ys, xs = torch.where(binary)
+        y0 = int(ys.min().item())
+        y1 = int(ys.max().item()) + 1
+        x0 = int(xs.min().item())
+        x1 = int(xs.max().item()) + 1
+        pad_y = max(2, int(round((y1 - y0) * 0.15)))
+        pad_x = max(2, int(round((x1 - x0) * 0.15)))
+        y0 = max(0, y0 - pad_y)
+        y1 = min(height, y1 + pad_y)
+        x0 = max(0, x0 - pad_x)
+        x1 = min(width, x1 + pad_x)
+        crop = image_tensor[batch_index : batch_index + 1, :, y0:y1, x0:x1]
+        crop = F.interpolate(crop, size=(crop_size, crop_size), mode="bilinear", align_corners=False)
+        crops.append(crop[0])
+        valid_flags.append(torch.ones((), device=image_tensor.device, dtype=torch.float32))
+    return torch.stack(crops, dim=0), torch.stack(valid_flags, dim=0)
+
+
+def _compute_real_face_id_reference(model, source_image, face_mask):
+    if model is None:
+        return None, None
+    source_unit = ((source_image + 1.0) * 0.5).clamp(0.0, 1.0)
+    source_crops, valid = _extract_face_crops(source_unit, face_mask)
+    if float(valid.sum().item()) <= 0:
+        return None, None
+    source_crops = (source_crops - 0.5) / 0.5
+    with torch.no_grad():
+        source_embeds = F.normalize(model(source_crops), dim=1)
+    return source_embeds.detach(), valid.detach()
+
+
+def _compute_real_face_id_confusion(model, compare_image, face_mask, reference_embeddings, reference_valid):
+    if model is None or reference_embeddings is None or reference_valid is None:
+        return compare_image.new_tensor(0.0)
+    compare_unit = ((compare_image + 1.0) * 0.5).clamp(0.0, 1.0)
+    compare_crops, valid = _extract_face_crops(compare_unit, face_mask)
+    valid = valid * reference_valid.to(device=valid.device, dtype=valid.dtype)
+    if float(valid.sum().item()) <= 0:
+        return compare_image.new_tensor(0.0)
+    compare_crops = (compare_crops - 0.5) / 0.5
+    compare_embeds = F.normalize(model(compare_crops), dim=1)
+    ref_embeds = reference_embeddings.to(device=compare_embeds.device, dtype=compare_embeds.dtype)
+    similarities = F.cosine_similarity(compare_embeds, ref_embeds, dim=1)
+    weighted_similarity = (similarities * valid).sum() / valid.sum().clamp_min(1.0)
+    return (1.0 - weighted_similarity).clamp_min(0.0)
+
+
+def build_ownership_watermark_references(height, width, seed, bands, device):
+    references = []
+    for index, band in enumerate(bands):
+        if not isinstance(band, (tuple, list)) or len(band) != 2:
+            continue
+        band_low, band_high = band
+        references.append(
+            {
+                "band_mask": build_frequency_band_mask(height, width, band_low, band_high, device).detach(),
+                "template": build_watermark_template(
+                    height,
+                    width,
+                    (seed or 0) + 1973 * (index + 1),
+                    band_low,
+                    band_high,
+                    device,
+                ).detach(),
+            }
+        )
+    return references
+
+
+def compute_ownership_watermark_alignment(transformed, references, spatial_mask, config):
+    if not references:
+        return transformed.new_tensor(0.0)
+
+    image_f32 = transformed.to(dtype=torch.float32)
+    view_count = max(1, int(getattr(config, "ownership_watermark_views", 1)))
+    views = [image_f32]
+    if view_count >= 2:
+        compression_strength = max(0.03, float(getattr(config, "compression_jitter_strength", 0.0)) * 1.25)
+        views.append(apply_light_compression_proxy(image_f32, compression_strength))
+    if view_count >= 3:
+        scale_jitter = float(getattr(config, "updown_scale_jitter", 0.0))
+        scale = 1.0 - (scale_jitter if scale_jitter > 0 else 0.18)
+        views.append(apply_updown_scale_proxy(image_f32, scale=max(0.55, min(0.9, scale))))
+    if view_count >= 4:
+        sharpen_strength = float(getattr(config, "sharpen_proxy_strength", 0.0))
+        views.append(apply_sharpen_proxy(image_f32, strength=max(0.14, sharpen_strength if sharpen_strength > 0 else 0.18)))
+    if view_count >= 5:
+        views.append(apply_subpixel_translation(image_f32, max_shift_pixels=0.6))
+
+    alignments = []
+    for view in views[:view_count]:
+        for reference in references:
+            alignments.append(
+                compute_watermark_alignment(
+                    view,
+                    reference["band_mask"],
+                    reference["template"],
+                    spatial_mask,
+                )
+            )
+    return torch.stack(alignments).mean() if alignments else transformed.new_tensor(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1867,12 +2317,38 @@ def build_reference_region_masks(reference_data, config):
 # PGD optimizer
 # ---------------------------------------------------------------------------
 
-def select_proxy_timesteps(timesteps, denoiser_steps):
+def select_proxy_timesteps(timesteps, denoiser_steps, early_bias=0.0):
     if denoiser_steps <= 0:
         return []
     if len(timesteps) <= denoiser_steps:
         return [t.reshape(1) for t in timesteps]
-    indexes = torch.linspace(0, len(timesteps) - 1, steps=denoiser_steps).round().long().tolist()
+    if early_bias <= 1e-6:
+        indexes = torch.linspace(0, len(timesteps) - 1, steps=denoiser_steps).round().long().tolist()
+    else:
+        ramp = torch.linspace(0.0, 1.0, steps=denoiser_steps)
+        biased = ramp.pow(1.0 + float(early_bias))
+        last_index = len(timesteps) - 1
+        raw_indexes = []
+        for step_index, value in enumerate(biased):
+            if step_index == denoiser_steps - 1:
+                raw_indexes.append(last_index)
+            else:
+                raw_indexes.append(int(round(last_index * float(value.item()))))
+        indexes = []
+        seen = set()
+        for index in raw_indexes:
+            clamped = max(0, min(last_index, int(index)))
+            if clamped in seen:
+                continue
+            seen.add(clamped)
+            indexes.append(clamped)
+        cursor = 0
+        while len(indexes) < denoiser_steps and cursor <= last_index:
+            if cursor not in seen:
+                indexes.append(cursor)
+                seen.add(cursor)
+            cursor += 1
+        indexes = sorted(indexes[:denoiser_steps])
     return [timesteps[i].reshape(1) for i in indexes]
 
 
