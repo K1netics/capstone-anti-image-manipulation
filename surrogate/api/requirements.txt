@@ -1,3 +1,8 @@
+# Runtime note:
+# - Do not install torch/torchvision from this file into a fresh RunPod venv.
+# - Use ./runpod-setup.sh so the environment gets torch==2.8.0+cu128 and
+#   torchvision==0.23.0 from the CUDA 12.8 PyTorch index.
+# - The Docker image already installs torch separately for the same reason.
 fastapi>=0.115
 uvicorn[standard]>=0.30
 python-multipart>=0.0.9

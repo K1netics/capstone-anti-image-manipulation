@@ -53,6 +53,30 @@ To run npm commands with the bundled local Node 22 runtime:
 `cd /home/tobi/photoguard/surrogate && ./npmw install`
 `cd /home/tobi/photoguard/surrogate && ./npmw run build`
 
+## Run on RunPod
+
+For the current surrogate backend, use a CUDA 12.8 / PyTorch 2.8 template. The backend expects `torch==2.8.0+cu128`; do not let a fresh venv resolve to CUDA 13 wheels.
+
+Bootstrap the pod runtime:
+
+`cd /workspace/projects/surrogate-fresh/surrogate && bash runpod-setup.sh`
+
+Start the backend in the foreground:
+
+`cd /workspace/projects/surrogate-fresh/surrogate && bash runpod-backend.sh`
+
+Start the backend detached with logs:
+
+`cd /workspace/projects/surrogate-fresh/surrogate && bash runpod-backend-nohup.sh`
+
+Follow the log:
+
+`tail -f /workspace/projects/surrogate-fresh/surrogate/logs/backend.log`
+
+Verify runtime health:
+
+`curl -sS "http://127.0.0.1:8000/health?probe_pipeline=1&probe_surrogates=1"`
+
 ## Container images
 
 The surrogate workspace includes the same container bundle as `upgraded`, but points at the surrogate frontend/API/backend code.

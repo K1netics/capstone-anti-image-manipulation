@@ -2,6 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="${PHOTOGUARD_VENV:-/workspace/venvs/pg-surrogate-cu128}"
+
+if [[ -x "${VENV_DIR}/bin/activate" ]]; then
+  # shellcheck disable=SC1090
+  source "${VENV_DIR}/bin/activate"
+fi
 
 MODEL_DIR="${PHOTOGUARD_MODEL_DIR:-/workspace/artifacts/sdxl_local_inpaint_model}"
 if [[ ! -f "${MODEL_DIR}/model_index.json" ]]; then
@@ -37,5 +43,6 @@ echo "  xformers=${PHOTOGUARD_ENABLE_XFORMERS}"
 echo "  unet_checkpointing=${PHOTOGUARD_ENABLE_UNET_CHECKPOINTING}"
 echo "  vae_checkpointing=${PHOTOGUARD_ENABLE_VAE_CHECKPOINTING}"
 echo "  default_profile=${PHOTOGUARD_DEFAULT_IMMUNIZATION_PROFILE}"
+echo "  python=$(command -v python)"
 
 exec python -m uvicorn api.main:app --app-dir "${ROOT_DIR}" --host 0.0.0.0 --port 8000
