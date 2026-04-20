@@ -1,0 +1,8 @@
+numpy
+lpips
+pillow
+tqdm
+
+# Install torch/torchvision separately from the cu128 index before this file.
+# facenet-pytorch is optional and should be installed explicitly with --no-deps
+# if you want the real FaceNet branch without downgrading torch.
