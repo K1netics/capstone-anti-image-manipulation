@@ -297,13 +297,21 @@ export default function EditorWorkspace({ onProcess, isLoading, error }: EditorW
                     opacity: immunize ? 1 : 0.65,
                   }}
                 >
-                  <option value="stable_diffusion">Stable Diffusion</option>
-                  <option value="nano_banana_experimental">
-                    Nano Banana experimental (temporarily delegates to Stable Diffusion)
-                  </option>
+                  <option value="stable_diffusion">Stable Diffusion / latent inpainting</option>
+                  <option value="full_regeneration_scaffold">Full regeneration scaffold</option>
+                  <option value="instruction_editing_scaffold">Instruction editing scaffold</option>
+                  <option value="controlnet_scaffold">ControlNet scaffold</option>
+                  <option value="style_transfer_scaffold">Style transfer scaffold</option>
+                  <option value="text_aware_scaffold">Text-aware scaffold</option>
+                  <option value="adversarial_hardened_scaffold">Adversarial hardened scaffold</option>
+                  <option value="nano_banana_experimental">Nano Banana experimental</option>
+                  <option value="nano_banana_2">Nano Banana 2</option>
+                  <option value="nano_banana_2_hard_block">Nano Banana 2 hard block</option>
+                  <option value="nano_banana_2_distortion">Nano Banana 2 distortion block</option>
                 </select>
                 <span className="block text-xs mt-2" style={{ color: "var(--muted-foreground)" }}>
-                  Selects one defense profile for the immunization step. Profiles are not combined.
+                  Selects one defense profile for the immunization step. Profiles are not combined,
+                  and the Nano Banana profiles currently have the most developed layered defense stack. Hard block and distortion block are stricter and may refuse to run instead of silently weakening the defense.
                 </span>
               </label>
 

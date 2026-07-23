@@ -23,13 +23,20 @@ interface OutputSectionProps {
 }
 
 function profileLabel(profile: ImmunizationProfile | null) {
-  if (profile === "nano_banana_experimental") {
-    return "Nano Banana experimental";
-  }
-  if (profile === "stable_diffusion") {
-    return "Stable Diffusion";
-  }
-  return null;
+  const labels: Record<ImmunizationProfile, string> = {
+    stable_diffusion: "Stable Diffusion / latent inpainting",
+    full_regeneration_scaffold: "Full regeneration scaffold",
+    instruction_editing_scaffold: "Instruction editing scaffold",
+    controlnet_scaffold: "ControlNet scaffold",
+    style_transfer_scaffold: "Style transfer scaffold",
+    text_aware_scaffold: "Text-aware scaffold",
+    adversarial_hardened_scaffold: "Adversarial hardened scaffold",
+    nano_banana_experimental: "Nano Banana experimental",
+    nano_banana_2: "Nano Banana 2",
+    nano_banana_2_hard_block: "Nano Banana 2 hard block",
+    nano_banana_2_distortion: "Nano Banana 2 distortion block",
+  };
+  return profile ? labels[profile] : null;
 }
 
 function formatStage(stage: string | null) {

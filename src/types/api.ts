@@ -3,7 +3,18 @@ export interface GeneratedImage {
   dataUrl: string;
 }
 
-export type ImmunizationProfile = "stable_diffusion" | "nano_banana_experimental";
+export type ImmunizationProfile =
+  | "stable_diffusion"
+  | "full_regeneration_scaffold"
+  | "instruction_editing_scaffold"
+  | "controlnet_scaffold"
+  | "style_transfer_scaffold"
+  | "text_aware_scaffold"
+  | "adversarial_hardened_scaffold"
+  | "nano_banana_experimental"
+  | "nano_banana_2"
+  | "nano_banana_2_hard_block"
+  | "nano_banana_2_distortion";
 export type WorkingResolution = "512" | "1024" | "original";
 export type OutputFormat = "png" | "webp";
 

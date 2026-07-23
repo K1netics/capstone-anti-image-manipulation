@@ -88,9 +88,7 @@ DEFAULT_SEED = 1234
 SUPPORTED_WORKING_RESOLUTIONS = ("512", "1024", "original")
 SUPPORTED_OUTPUT_FORMATS = ("png", "webp")
 SUPPORTED_IMMUNIZATION_PROFILES = get_available_immunization_profiles()
-DELEGATED_IMMUNIZATION_PROFILES = {
-    "nano_banana_experimental": "stable_diffusion",
-}
+DELEGATED_IMMUNIZATION_PROFILES: dict[str, str] = {}
 
 DEFAULT_IMMUNIZATION_CONFIG = ImmunizationConfig(
     profile_name="stable_diffusion",
@@ -119,6 +117,7 @@ if DEFAULT_OUTPUT_FORMAT not in SUPPORTED_OUTPUT_FORMATS:
     DEFAULT_OUTPUT_FORMAT = "png"
 DEFAULT_IMMUNIZATION_RESOLUTION = 512
 IMMUNIZATION_FALLBACK_RESOLUTION = 384
+NANO_BANANA_2_IMMUNIZATION_RESOLUTION = 384
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -238,6 +237,25 @@ def _is_out_of_memory_error(exc: BaseException) -> bool:
     if isinstance(exc, torch.OutOfMemoryError):
         return True
     return "out of memory" in str(exc).lower()
+
+
+def _is_retryable_gpu_runtime_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return any(
+        token in message
+        for token in (
+            "out of memory",
+            "cuda",
+            "cublas_status_alloc_failed",
+            "cublas_status_not_initialized",
+            "cublas",
+            "cudnn_status_alloc_failed",
+            "cudnn",
+            "cuda error: an illegal memory access was encountered",
+            "cuda error: device-side assert triggered",
+            "cuda error: unspecified launch failure",
+        )
+    )
 
 
 def _normalize_request_id(request_id: str | None) -> str:
@@ -434,6 +452,16 @@ def _normalized_size(size: tuple[int, int], max_image_dimension: int) -> tuple[i
     return target_width, target_height
 
 
+def _preferred_immunization_resolution(profile_name: str) -> int:
+    if profile_name in {"nano_banana_2", "nano_banana_2_hard_block", "nano_banana_2_distortion"}:
+        return NANO_BANANA_2_IMMUNIZATION_RESOLUTION
+    return DEFAULT_IMMUNIZATION_RESOLUTION
+
+
+def _is_strict_immunization_profile(profile_name: str) -> bool:
+    return profile_name in {"nano_banana_2_hard_block", "nano_banana_2_distortion"}
+
+
 def _pad_image_to_canvas(image: Image.Image, target_size: tuple[int, int], *, fill: int | tuple[int, int, int]) -> Image.Image:
     if image.size == target_size:
         return image
@@ -511,24 +539,279 @@ def _immunization_config_for_profile(profile_name: str, target_size: tuple[int, 
         profile_name=profile_name,
         target_size=target_size,
     )
+    if profile_name == "full_regeneration_scaffold":
+        return replace(
+            config,
+            target_mode="shifted_input",
+            iters=12,
+            target_strength=0.55,
+            chaos_strength=0.18,
+            denoiser_strength=0.12,
+            resize_jitter=0.05,
+            noise_strength=0.004,
+            compression_jitter_strength=0.03,
+            subpixel_jitter=0.15,
+            frequency_noise_strength=0.002,
+            watermark_strength=0.03,
+            region_priority_strength=0.03,
+            priority_face_strength=0.15,
+            priority_skin_strength=0.1,
+            semantic_boundary_strength=0.02,
+            max_prompt_variants=2,
+        )
+    if profile_name == "instruction_editing_scaffold":
+        return replace(
+            config,
+            target_mode="shifted_input",
+            iters=12,
+            target_strength=0.5,
+            chaos_strength=0.16,
+            denoiser_strength=0.12,
+            resize_jitter=0.04,
+            noise_strength=0.004,
+            compression_jitter_strength=0.035,
+            subpixel_jitter=0.2,
+            frequency_noise_strength=0.002,
+            watermark_strength=0.04,
+            region_priority_strength=0.05,
+            priority_face_strength=0.2,
+            priority_skin_strength=0.15,
+            semantic_boundary_strength=0.04,
+            max_prompt_variants=2,
+        )
+    if profile_name == "controlnet_scaffold":
+        return replace(
+            config,
+            target_mode="gray",
+            iters=11,
+            target_strength=0.42,
+            chaos_strength=0.14,
+            denoiser_strength=0.08,
+            resize_jitter=0.03,
+            noise_strength=0.003,
+            compression_jitter_strength=0.03,
+            subpixel_jitter=0.18,
+            frequency_noise_strength=0.003,
+            frequency_band_low=0.14,
+            frequency_band_high=0.32,
+            watermark_strength=0.03,
+            region_priority_strength=0.04,
+            priority_face_strength=0.18,
+            priority_skin_strength=0.12,
+            texture_tracking_strength=0.05,
+            semantic_boundary_strength=0.03,
+            max_prompt_variants=2,
+        )
+    if profile_name == "style_transfer_scaffold":
+        return replace(
+            config,
+            target_mode="shifted_input",
+            iters=10,
+            target_strength=0.4,
+            chaos_strength=0.12,
+            denoiser_strength=0.08,
+            resize_jitter=0.03,
+            noise_strength=0.003,
+            compression_jitter_strength=0.025,
+            subpixel_jitter=0.12,
+            frequency_noise_strength=0.0025,
+            frequency_band_low=0.1,
+            frequency_band_high=0.22,
+            watermark_strength=0.03,
+            edge_tracking_strength=0.05,
+            max_prompt_variants=2,
+        )
+    if profile_name == "text_aware_scaffold":
+        return replace(
+            config,
+            target_mode="gray",
+            iters=11,
+            target_strength=0.44,
+            chaos_strength=0.13,
+            denoiser_strength=0.08,
+            resize_jitter=0.02,
+            noise_strength=0.003,
+            compression_jitter_strength=0.035,
+            subpixel_jitter=0.15,
+            frequency_noise_strength=0.003,
+            frequency_band_low=0.12,
+            frequency_band_high=0.3,
+            watermark_strength=0.05,
+            region_priority_strength=0.06,
+            priority_text_strength=0.85,
+            priority_logo_strength=0.7,
+            semantic_boundary_strength=0.03,
+            max_prompt_variants=2,
+        )
+    if profile_name == "adversarial_hardened_scaffold":
+        return replace(
+            config,
+            target_mode="checkerboard",
+            iters=14,
+            target_strength=0.6,
+            chaos_strength=0.2,
+            denoiser_strength=0.14,
+            denoiser_steps=1,
+            eot_samples=2,
+            resize_jitter=0.06,
+            noise_strength=0.005,
+            compression_jitter_strength=0.045,
+            subpixel_jitter=0.22,
+            frequency_noise_strength=0.0035,
+            frequency_band_low=0.1,
+            frequency_band_high=0.3,
+            watermark_strength=0.06,
+            region_priority_strength=0.06,
+            priority_face_strength=0.2,
+            priority_skin_strength=0.15,
+            priority_text_strength=0.3,
+            priority_logo_strength=0.3,
+            semantic_boundary_strength=0.04,
+            max_prompt_variants=3,
+        )
     if profile_name == "nano_banana_experimental":
         return replace(
             config,
-            eps=0.06,
-            step_size=0.005,
+            eps=0.055,
+            step_size=0.0045,
             target_mode="shifted_input",
-            iters=10,
-            target_strength=0.45,
+            iters=12,
+            target_strength=0.42,
             chaos_strength=0.12,
-            denoiser_strength=0.12,
+            denoiser_strength=0.08,
             denoiser_steps=1,
+            eot_samples=1,
+            resize_jitter=0.02,
+            noise_strength=0.003,
+            blur_kernel_size=3,
+            semantic_boundary_strength=0.05,
+            semantic_ring_width=10,
+            compression_jitter_strength=0.04,
+            subpixel_jitter=0.25,
+            frequency_noise_strength=0.003,
+            frequency_band_low=0.09,
+            frequency_band_high=0.24,
+            watermark_strength=0.07,
+            region_priority_strength=0.08,
+            priority_face_strength=0.4,
+            priority_skin_strength=0.25,
+            priority_text_strength=0.45,
+            priority_logo_strength=0.45,
+            max_prompt_variants=3,
+        )
+    if profile_name == "nano_banana_2":
+        return replace(
+            config,
+            eps=0.06,
+            step_size=0.0048,
+            target_mode="shifted_input",
+            iters=16,
+            target_strength=0.46,
+            chaos_strength=0.14,
+            denoiser_strength=0.0,
+            denoiser_steps=0,
+            eot_samples=1,
+            resize_jitter=0.025,
+            noise_strength=0.0035,
+            blur_kernel_size=3,
+            semantic_boundary_strength=0.065,
+            semantic_ring_width=12,
+            compression_jitter_strength=0.05,
+            subpixel_jitter=0.32,
+            frequency_noise_strength=0.0035,
+            frequency_band_low=0.08,
+            frequency_band_high=0.26,
+            watermark_strength=0.09,
+            region_priority_strength=0.11,
+            priority_face_strength=0.62,
+            priority_skin_strength=0.36,
+            priority_text_strength=0.6,
+            priority_logo_strength=0.6,
+            reference_confusion_strength=0.15,
+            identity_drift_strength=0.13,
+            context_blend_strength=0.06,
+            reference_region_count=3,
+            max_prompt_variants=3,
+        )
+    if profile_name == "nano_banana_2_hard_block":
+        return replace(
+            config,
+            eps=0.09,
+            step_size=0.006,
+            target_mode="shifted_input",
+            iters=18,
+            target_strength=0.5,
+            chaos_strength=0.16,
+            denoiser_strength=0.0,
+            denoiser_steps=0,
             eot_samples=1,
             resize_jitter=0.03,
             noise_strength=0.004,
-            blur_kernel_size=3,
-            semantic_boundary_strength=0.06,
-            semantic_ring_width=8,
-            max_prompt_variants=2,
+            blur_kernel_size=1,
+            semantic_boundary_strength=0.085,
+            semantic_ring_width=14,
+            compression_jitter_strength=0.055,
+            subpixel_jitter=0.34,
+            frequency_noise_strength=0.004,
+            frequency_band_low=0.08,
+            frequency_band_high=0.28,
+            watermark_strength=0.11,
+            region_priority_strength=0.14,
+            priority_face_strength=0.7,
+            priority_skin_strength=0.4,
+            priority_text_strength=0.7,
+            priority_logo_strength=0.7,
+            reference_confusion_strength=0.18,
+            identity_drift_strength=0.16,
+            context_blend_strength=0.08,
+            reference_region_count=3,
+            tripwire_strength=0.24,
+            tripwire_ring_strength=0.16,
+            tripwire_anchor_strength=0.14,
+            tripwire_anchor_count=5,
+            tripwire_tile_size=32,
+            max_prompt_variants=3,
+        )
+    if profile_name == "nano_banana_2_distortion":
+        return replace(
+            config,
+            eps=0.11,
+            step_size=0.007,
+            target_mode="shifted_input",
+            iters=20,
+            target_strength=0.54,
+            chaos_strength=0.18,
+            denoiser_strength=0.0,
+            denoiser_steps=0,
+            eot_samples=1,
+            resize_jitter=0.035,
+            noise_strength=0.0045,
+            blur_kernel_size=1,
+            semantic_boundary_strength=0.095,
+            semantic_ring_width=15,
+            compression_jitter_strength=0.06,
+            subpixel_jitter=0.36,
+            frequency_noise_strength=0.0045,
+            frequency_band_low=0.08,
+            frequency_band_high=0.3,
+            watermark_strength=0.13,
+            region_priority_strength=0.16,
+            priority_face_strength=0.76,
+            priority_skin_strength=0.45,
+            priority_text_strength=0.76,
+            priority_logo_strength=0.76,
+            reference_confusion_strength=0.22,
+            identity_drift_strength=0.18,
+            context_blend_strength=0.09,
+            reference_region_count=3,
+            tripwire_strength=0.3,
+            tripwire_ring_strength=0.2,
+            tripwire_anchor_strength=0.18,
+            tripwire_anchor_count=6,
+            tripwire_global_strength=0.16,
+            tripwire_global_count=4,
+            tripwire_tile_size=32,
+            max_prompt_variants=3,
         )
     return config
 
@@ -544,7 +827,24 @@ def _low_memory_immunization_config(config: ImmunizationConfig) -> ImmunizationC
         noise_strength=min(config.noise_strength, 0.005),
         blur_kernel_size=1,
         semantic_ring_width=min(config.semantic_ring_width, 8),
-        max_prompt_variants=1 if config.profile_name == "nano_banana_experimental" else max(1, config.max_prompt_variants),
+        compression_jitter_strength=min(config.compression_jitter_strength, 0.02),
+        subpixel_jitter=min(config.subpixel_jitter, 0.12),
+        frequency_noise_strength=min(config.frequency_noise_strength, 0.0015),
+        watermark_strength=min(config.watermark_strength, 0.03),
+        region_priority_strength=min(config.region_priority_strength, 0.04),
+        texture_tracking_strength=min(config.texture_tracking_strength, 0.03),
+        edge_tracking_strength=min(config.edge_tracking_strength, 0.03),
+        reference_confusion_strength=0.0 if config.profile_name in {"nano_banana_2", "nano_banana_2_hard_block", "nano_banana_2_distortion"} else min(config.reference_confusion_strength, 0.06),
+        identity_drift_strength=0.0 if config.profile_name in {"nano_banana_2", "nano_banana_2_hard_block", "nano_banana_2_distortion"} else min(config.identity_drift_strength, 0.05),
+        context_blend_strength=0.0 if config.profile_name in {"nano_banana_2", "nano_banana_2_hard_block", "nano_banana_2_distortion"} else min(config.context_blend_strength, 0.03),
+        reference_region_count=1 if config.profile_name in {"nano_banana_2", "nano_banana_2_hard_block", "nano_banana_2_distortion"} else min(config.reference_region_count, 2),
+        tripwire_strength=0.0 if config.profile_name in {"nano_banana_2_hard_block", "nano_banana_2_distortion"} else min(config.tripwire_strength, 0.12),
+        tripwire_ring_strength=0.0 if config.profile_name in {"nano_banana_2_hard_block", "nano_banana_2_distortion"} else min(config.tripwire_ring_strength, 0.08),
+        tripwire_anchor_strength=0.0 if config.profile_name in {"nano_banana_2_hard_block", "nano_banana_2_distortion"} else min(config.tripwire_anchor_strength, 0.08),
+        tripwire_anchor_count=0 if config.profile_name in {"nano_banana_2_hard_block", "nano_banana_2_distortion"} else min(config.tripwire_anchor_count, 2),
+        tripwire_global_strength=0.0 if config.profile_name == "nano_banana_2_distortion" else min(config.tripwire_global_strength, 0.08),
+        tripwire_global_count=0 if config.profile_name == "nano_banana_2_distortion" else min(config.tripwire_global_count, 2),
+        max_prompt_variants=1 if config.profile_name in {"nano_banana_experimental", "nano_banana_2", "nano_banana_2_hard_block", "nano_banana_2_distortion"} else max(1, config.max_prompt_variants),
     )
 
 
@@ -589,8 +889,8 @@ def _try_immunize_once(
             progress_callback=progress_callback,
         )
         return immunized_image
-    except RuntimeError as exc:
-        if not _is_out_of_memory_error(exc):
+    except Exception as exc:
+        if not _is_retryable_gpu_runtime_error(exc):
             raise
         _cleanup_runtime_memory()
         return None
@@ -700,15 +1000,23 @@ def _process_request(
                 effective_immunization_profile = _resolve_immunization_profile(immunization_profile, fb)
                 fb.processing("Applying PhotoGuard immunization before editing.")
                 report_progress("immunizing", 38.0, "Applying PhotoGuard immunization before editing.")
+                preferred_immunization_resolution = _preferred_immunization_resolution(
+                    effective_immunization_profile
+                )
                 immunization_image, immunization_mask = _resize_for_immunization_fallback(
                     init_image,
                     mask_image,
-                    max_dimension=DEFAULT_IMMUNIZATION_RESOLUTION,
+                    max_dimension=preferred_immunization_resolution,
                 )
                 if immunization_image.size != init_image.size:
-                    fb.info(
-                        "Using a separate 512px defense canvas for immunization to reduce runtime and GPU memory use."
-                    )
+                    if effective_immunization_profile in {"nano_banana_2", "nano_banana_2_hard_block", "nano_banana_2_distortion"}:
+                        fb.info(
+                            "Using a separate 384px defense canvas for the Nano Banana 2 defense so the stronger profile-specific losses can run without immediately falling back."
+                        )
+                    else:
+                        fb.info(
+                            "Using a separate 512px defense canvas for immunization to reduce runtime and GPU memory use."
+                        )
                 immunization_config = _immunization_config_for_profile(
                     effective_immunization_profile,
                     immunization_image.size,
@@ -724,6 +1032,14 @@ def _process_request(
                     seed=seed,
                     progress_callback=immunization_progress_callback,
                 )
+                if immunized_working_image is None and _is_strict_immunization_profile(effective_immunization_profile):
+                    fb.error(
+                        "Nano Banana 2 hard-block could not run at full defense strength on the current GPU configuration."
+                    )
+                    fb.info(
+                        "Hard-block mode fails closed instead of silently weakening the defense. Try a smaller source image or working resolution 512."
+                    )
+                    raise HTTPException(status_code=503, detail=fb.get_status_text())
                 if immunized_working_image is None:
                     fb.warning(
                         "GPU memory ran out during immunization. Retrying with a lower-memory defense profile."
@@ -887,7 +1203,11 @@ def _process_request(
                 raise HTTPException(status_code=503, detail=fb.get_status_text()) from exc
             traceback.print_exc()
             fb.error("PhotoGuard hit a runtime error while processing this request.")
-            fb.info(f"Debug detail: {type(exc).__name__}")
+            runtime_detail = str(exc).strip()
+            if runtime_detail:
+                fb.info(f"Debug detail: {type(exc).__name__}: {runtime_detail[:220]}")
+            else:
+                fb.info(f"Debug detail: {type(exc).__name__}")
             _set_request_progress(
                 request_id,
                 status="failed",
@@ -900,7 +1220,11 @@ def _process_request(
         except Exception as exc:  # pragma: no cover - runtime failure path
             traceback.print_exc()
             fb.error("PhotoGuard could not finish this request.")
-            fb.info(f"Debug detail: {type(exc).__name__}")
+            runtime_detail = str(exc).strip()
+            if runtime_detail:
+                fb.info(f"Debug detail: {type(exc).__name__}: {runtime_detail[:220]}")
+            else:
+                fb.info(f"Debug detail: {type(exc).__name__}")
             _set_request_progress(
                 request_id,
                 status="failed",
