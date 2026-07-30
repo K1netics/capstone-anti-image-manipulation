@@ -1,0 +1,75 @@
+@font-face {
+  font-family: 'Monument Extended';
+  src: url('/Fonts/MonumentExtended-Regular.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/Fonts/Montserrat/Montserrat-Medium.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+}
+ 
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-size: 16px;
+
+  /* Base */
+  --background: #0A0A0F;
+  --foreground: #FFFFFF;
+
+  /* Cards */
+  --card: #12121A;
+  --card-foreground: #FFFFFF;
+
+  /* Primary (gradient will be applied in components) */
+  --primary: #C6A4FF;
+  --primary-foreground: #0A0A0F;
+
+  /* Secondary */
+  --secondary: #1A1A24;
+  --secondary-foreground: #B8B8C5;
+
+  /* Muted */
+  --muted: #12121A;
+  --muted-foreground: #7A7A8C;
+
+  /* Accent (holographic tones) */
+  --accent: #C6A4FF;
+  --accent-foreground: #FFFFFF;
+
+  /* Destructive */
+  --destructive: #d4183d;
+
+  /* Borders / UI */
+  --border: rgba(198, 164, 255, 0.2);
+  --ring: #C6A4FF;
+
+  --radius: 1rem;
+
+  --font-weight-medium: 500;
+  --font-weight-normal: 400;
+}
+
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+    border: none;
+  }
+  html { font-size: var(--font-size); }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: 'Montserrat', sans-serif;
+    font-weight: 500;
+    -webkit-font-smoothing: antialiased;
+  }
+
+h1 { font-size: 1.5rem; font-weight: var(--font-weight-medium); line-height: 1.5; }
+h2 { font-size: 1.25rem; font-weight: var(--font-weight-medium); line-height: 1.5; }
+  }
